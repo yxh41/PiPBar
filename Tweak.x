@@ -32,6 +32,12 @@ static const CGFloat kFrameBottom = 40.0;  // 底部（按钮条）高
 static const CGFloat kFrameRadius = 22.0;  // 外框圆角（对齐系统 PiP 圆角，待真机校准）
 
 // —— Pegasus / SpringBoard 私有类（iOS 17 运行时头，16.4.1 待日志确认；全部判空防御）——
+// 注意：这些声明不只是给编译器看的 —— %hook 展开后会直接向 self 发消息，
+// 没有 @interface 就是 forward declaration，-Werror 下直接编译失败（v0.1 首构建踩过）。
+@interface SBPIPContainerViewController : UIViewController
+- (UIViewController *)contentViewController;
+@end
+
 @interface PGCommand : NSObject
 + (id)commandForSetPlaying:(BOOL)arg1;
 - (long long)playbackAction;
@@ -132,7 +138,7 @@ static void pipDumpMethods(Class c, NSString *where) {
     @try {
         UIViewController *content = nil;
         if ([self respondsToSelector:@selector(contentViewController)]) {
-            content = [self performSelector:@selector(contentViewController)];
+            content = [self contentViewController];
         }
         if (content == nil || content.view == nil) {
             PIPLog(@"loadView: contentViewController 不可用（iOS 版本漂移?）");
@@ -161,7 +167,8 @@ static void pipDumpMethods(Class c, NSString *where) {
             if (tag == 2) {
                 // 播放/暂停：Pegasus 命令通道（iOS 17 头确认，16.4.1 真机验证中）
                 gPlaying = !gPlaying;
-                [c handleCommand:[PGCommand commandForSetPlaying:gPlaying]];
+                [(PGPictureInPictureViewController *)c handleCommand:
+                    [PGCommand commandForSetPlaying:gPlaying]];
                 PIPLog(@"play/pause -> setPlaying=%d", gPlaying);
             } else {
                 // 上一曲(1) / 下一曲(3)：action 码待嗅探，v0.2 接通
