@@ -137,12 +137,10 @@ static __weak UIView *gVideoHost = nil;
 
 // 缓存图标：play/pause 随播放状态切换（v0.3 用户反馈「播放暂停不会变化」）
 static UIImage *pipIcon(BOOL playing) {
-    static UIImage *playImg, *pauseImg, *prevImg, *nextImg;
+    static UIImage *playImg, *pauseImg;
     if (playImg == nil) {
         playImg  = [UIImage systemImageNamed:@"play.fill"];
         pauseImg = [UIImage systemImageNamed:@"pause.fill"];
-        prevImg  = [UIImage systemImageNamed:@"backward.end.fill"];
-        nextImg  = [UIImage systemImageNamed:@"forward.end.fill"];
     }
     // 固定 15pt：小而精致（用户明确嫌 v0.3 的 20pt 大）；不跟 Dynamic Type 忽大忽小
     UIImage *base = playing ? pauseImg : playImg;
