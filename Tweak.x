@@ -493,7 +493,8 @@ static void pipInitPegasusOnce(void);
     }
 }
 
-%end   // PegasusHooks
+%end   // %hook PGPictureInPictureViewController
+%end   // %group PegasusHooks —— 组与钩子各要一个 %end，嵌套不能省
 
 static BOOL gPegasusReady = NO;
 static void pipInitPegasusOnce(void) {
