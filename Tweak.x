@@ -2,18 +2,24 @@
 // 目标环境：iPhone 12 Pro / iOS 16.4.1 / roothide / arm64e
 // 作用进程：SpringBoard（系统画中画的宿主）
 //
-// v0.2 变更（真机截图校准）：
-//   * 真机截图证明：把边条贴在 contentViewController.view 上会**伸到 PiP 可见区外面**
-//     （该 view 是含 chrome 的容器，比可见视频大）。v0.2 改为运行时选挂载层：
-//     优先 _contentView（PGLayerHostView，真正的视频区域）→ _contentClippingView →
-//     _containerView → 回退 contentVC.view，并把各候选的 class/frame 打进日志。
-//   * 边条/按钮全部改到 layoutSubviews 里按**当前 bounds**重算，初始 frame 不再有意义
-//     （v0.1 用 init 时的 bounds 布局，bounds 后变就错位 —— 截图里"伸出去"的另一诱因）。
+// v0.2 变更（回应用户「设置里没有 / 日志在哪 / 你画的是什么」三条）：
+//   * 【画歪】真实机截图：边条贴在 contentViewController.view 上会**伸到 PiP 可见区外面**
+//     （该 view 是含 chrome 的容器，比可见视频大）。v0.2 按三级策略挑挂载层：
+//       ① 递归扫描找 PGLayerHost*（真正的视频宿主矩形，不依赖 iOS 16/17 会漂移的 ivar 名）
+//       ② KVC ivar（_contentView / _contentClippingView / _containerView，只收明显比容器窄的）
+//       ③ 扫描带子图层的 Content*/Host* 视图 → ④ 回退 contentVC.view
+//     每一步都把 class/frame 打进日志，错了能一眼看出该换哪级。
+//   * 【贴不住】layoutSubviews 自愈：父视图 bounds 在安装瞬间常是 0（autoresize 救不回来），
+//     现在每次布局先把自己对齐到父 bounds，并按**当前 bounds + 当前偏好**全量重算四条边条。
+//   * 【吃掉手势】我们是铺满视频区的透明覆盖层，会把 PiP 原生「拖动/单击展开/双击缩放」
+//     全吃掉。新增 hitTest 覆写：只有落在边条/按钮上的触摸才接管，其余穿透回去。
 //   * 新增设置面板（PreferenceLoader，plist-only bundle，无编译）：
 //     启用 / 显示外框 / 显示按钮 / 外框宽度 / 底部高度 / 文件日志 / 调试日志。
 //     所有 specifier 带 PostNotification=darwin 通知，翻开关立即热生效（无需 respring）。
 //   * 新增文件日志（/var/mobile/Library/Logs/PiPBar.log，256KB 自动截断），
 //     用户不用连电脑，Filza 直接翻 —— 与 MapAdKiller 的 FileLog 同思路。
+//   * Pegasus 钩子拆成独立 %group：Pegasus.framework 可能懒加载，跟 SBPIP 挤在同一组时
+//     一旦 ctor 时它还没进内存，整组 %init 一起落空。改为 content VC 实例化后补挂。
 //
 // 机制路线（独立实现，仅参考 FreePIP 的公开机制结论，未复用其 GPL 代码）：
 //   SpringBoard 进程：SBPIPContainerViewController → PGPictureInPictureViewController(Pegasus)
@@ -38,9 +44,11 @@ static BOOL gDebugLog = NO;
 static CGFloat gFrameW = 12.0;    // 顶/左右边框宽
 static CGFloat gBarH = 40.0;      // 底部控制条高
 
+// Copy 系列返回 +1 引用；ARC 下必须 CFBridgingRelease 交出所有权（否则 -Werror 编不过）
 static id pipPref(NSString *key) {
-    return CFPreferencesCopyAppValue((__bridge CFStringRef)key,
-                                     (__bridge CFStringRef)@"com.yxh41.pipbar");
+    CFPropertyListRef v = CFPreferencesCopyAppValue((__bridge CFStringRef)key,
+                                                    (__bridge CFStringRef)@"com.yxh41.pipbar");
+    return v ? CFBridgingRelease(v) : nil;
 }
 
 static void pipReadPrefs(void) {
@@ -162,16 +170,36 @@ static BOOL gPlaying = YES;   // 最近一次已知的播放状态
     if (self.onTap != nil) self.onTap(sender.tag);
 }
 
+// 我们是铺满整块视频区的透明覆盖层。若不拦这一刀，命中会落到 self 上，
+// PiP 原生的「拖动 / 单击展开 / 双击缩放」就全被吃掉了。
+// 这里只放行落在【边条或按钮】上的触摸，其余一律穿透回 Pegasus。
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return (hit == self) ? nil : hit;
+}
+
 // 全部按【当前 bounds + 当前偏好】重算 —— 偏好热更新也走这里（setNeedsLayout）
+// 挂在他人 Landfield 上时 bounds 可能在安装瞬间还是 0（autoresize 救不回来）。
+// 所以把「贴合父视图」放进 layoutSubviews 自愈 —— 每次布局先看一眼父 bounds。
 - (void)layoutSubviews {
     [super layoutSubviews];
+
+    UIView *sup = self.superview;
+    if (sup != nil && CGRectGetWidth(sup.bounds) > 1.0 && CGRectGetHeight(sup.bounds) > 1.0
+        && !CGRectEqualToRect(self.frame, sup.bounds)) {
+        self.frame = sup.bounds;          // 触发下一轮 layoutSubviews，届时已相等，不会死循环
+        return;
+    }
+
     CGFloat w = CGRectGetWidth(self.bounds);
     CGFloat h = CGRectGetHeight(self.bounds);
     CGFloat sw = gFrameW, bh = gBarH;
     if (w <= 0.0 || h <= 0.0) return;
 
-    self.hidden = !gShowFrame;
+    self.hidden = !gShowFrame && !gShowButtons;
     self.topBar.hidden = self.leftBar.hidden = self.rightBar.hidden = !gShowFrame;
+    // 只开按钮、关外框时底条仍要露出来，否则按钮无处安放
+    self.bottomBar.hidden = !gShowFrame && !gShowButtons;
 
     self.topBar.frame = CGRectMake(0, 0, w, sw);
     CGFloat midH = h - sw - bh;
@@ -229,7 +257,7 @@ static void pipDumpHierarchy(UIView *root, NSString *where) {
         [s appendFormat:@"%@ %@", NSStringFromClass(v.class), NSStringFromCGRect(v.frame)];
         if (v.isHidden) [s appendString:@" [hidden]"];
         [lines addObject:s];
-        if (depth < 3) {
+        if (depth < 6) {
             for (UIView *sv in [v.subviews reverseObjectEnumerator]) {
                 [stack addObject:@[sv, @(depth + 1)]];
             }
@@ -238,10 +266,58 @@ static void pipDumpHierarchy(UIView *root, NSString *where) {
     PIPLog(@"HIER %@:\n%@", where, [lines componentsJoinedByString:@"\n"]);
 }
 
-// 找「可见视频区域」：优先私有 ivar（KVC），逐个回退；把每个候选都打进日志
+// 策略 B：递归扫描。不依赖 ivar 名（iOS 16 vs 17 会漂移），靠两类信号找视频层：
+//   强信号 = 类名含 PGLayerHost（Pegasus 的远端图层宿主，就是可见视频矩形本身）
+//   弱信号 = 类名含 Content/Host 且自己带了子图层
+// 两者都按「面积最大」取胜 —— PiP 里视频层一定是最大的那个。
+static UIView *pipScanForVideoHost(UIView *root, BOOL strongOnly) {
+    if (root == nil) return nil;
+    UIView *best = nil;
+    CGFloat bestArea = 0.0;
+    NSMutableArray<NSArray *> *stack = [NSMutableArray arrayWithObject:@[root, @0]];
+    NSUInteger seen = 0;
+    while (stack.count > 0 && seen < 300) {
+        NSArray *item = stack.lastObject;
+        [stack removeLastObject];
+        UIView *v = item[0];
+        NSUInteger depth = [item[1] unsignedIntegerValue];
+        seen++;
+        NSString *cn = NSStringFromClass(v.class);
+        CGSize sz = v.bounds.size;
+        CGFloat area = sz.width * sz.height;
+        BOOL ok = (area > 1.0) && !v.isHidden && v.alpha > 0.01 && area > bestArea;
+        if (ok) {
+            BOOL host = [cn rangeOfString:@"PGLayerHost"].location != NSNotFound;
+            BOOL contentish = ([cn rangeOfString:@"Content"].location != NSNotFound ||
+                               [cn rangeOfString:@"Host"].location != NSNotFound) &&
+                              v.layer.sublayers.count > 0;
+            if (host || (!strongOnly && contentish)) {
+                best = v;
+                bestArea = area;
+            }
+        }
+        if (depth < 6) {
+            for (UIView *sv in v.subviews) [stack addObject:@[sv, @(depth + 1)]];
+        }
+    }
+    return best;
+}
+
+// 策略优先级：强信号扫描 → KVC ivar → 弱信号扫描 → contentVC.view（v0.1 的老位置）
 static UIView *pipPickHostView(UIViewController *content) {
     UIView *v = content.view;
     if (v == nil) return nil;
+
+    PIPLog(@"HOST contentVC=%@ view=%@ frame=%@",
+           NSStringFromClass(content.class), NSStringFromClass(v.class), NSStringFromCGRect(v.frame));
+
+    UIView *strong = pipScanForVideoHost(v, YES);
+    if (strong != nil) {
+        PIPLog(@"HOST <- scan(strong) %@ frame=%@", NSStringFromClass(strong.class),
+               NSStringFromCGRect(strong.frame));
+        return strong;
+    }
+
     NSArray<NSString *> *candidates = @[@"_contentView", @"_contentClippingView", @"_containerView"];
     for (NSString *name in candidates) {
         @try {
@@ -250,13 +326,23 @@ static UIView *pipPickHostView(UIViewController *content) {
                 UIView *cv = (UIView *)cand;
                 PIPLog(@"HOST candidate %@ -> %@ frame=%@",
                        name, NSStringFromClass(cv.class), NSStringFromCGRect(cv.frame));
-                if (CGRectGetWidth(cv.bounds) > 1.0) return cv;
+                CGFloat cw = CGRectGetWidth(cv.bounds), rw = CGRectGetWidth(v.bounds);
+                // 只接受「明显比容器小」的：跟容器一样宽的说明不是被裁的视频层
+                if (cw > 1.0 && (rw <= 0.0 || cw < rw - 1.0)) return cv;
             }
         } @catch (NSException *e) {
             PIPLog(@"HOST candidate %@ 不可用: %@", name, e.name);
         }
     }
-    PIPLog(@"HOST fallback -> contentViewController.view");
+
+    UIView *weak = pipScanForVideoHost(v, NO);
+    if (weak != nil) {
+        PIPLog(@"HOST <- scan(weak) %@ frame=%@", NSStringFromClass(weak.class),
+               NSStringFromCGRect(weak.frame));
+        return weak;
+    }
+
+    PIPLog(@"HOST fallback -> contentViewController.view（若仍伸出去，请回传 HIER 日志）");
     return v;
 }
 
@@ -285,6 +371,10 @@ static void pipDarwinCallback(CFNotificationCenterRef center, void *observer,
 
 #pragma mark - Hooks
 
+// Pegasus 单独成组：Pegasus.framework 可能是懒加载的，跟 SBPIP 放在同一个默认组里，
+// 一旦 ctor 时它还没进内存，整组 %init 会一起落空（SBPIP 也跟着不生效）。
+static void pipInitPegasusOnce(void);
+
 %hook SBPIPContainerViewController
 
 - (void)loadView {
@@ -306,6 +396,7 @@ static void pipDarwinCallback(CFNotificationCenterRef center, void *observer,
 
         UIView *host = pipPickHostView(content);
         if (host == nil) return;
+        pipInitPegasusOnce();   // content 已实例化 ⇒ Pegasus 必然已加载，此时挂它的钩子最稳
         pipDumpHierarchy(content.view, @"CONTENT-TREE");
 
         Class frameCls = objc_getClass("PIPFrameView");
@@ -367,6 +458,8 @@ static void pipDarwinCallback(CFNotificationCenterRef center, void *observer,
 
 // 系统控制（含我们自己发的）都会过这里 —— 用户点一下系统播放/暂停/快进快退，
 // 日志里就有对应的 playbackAction 值，这就是接上一曲/下一曲的依据。
+%group PegasusHooks
+
 %hook PGPictureInPictureViewController
 
 - (void)handleCommand:(id)cmd {
@@ -400,11 +493,21 @@ static void pipDarwinCallback(CFNotificationCenterRef center, void *observer,
     }
 }
 
-%end
+%end   // PegasusHooks
+
+static BOOL gPegasusReady = NO;
+static void pipInitPegasusOnce(void) {
+    if (gPegasusReady) return;
+    if (objc_getClass("PGPictureInPictureViewController") == nil) return;
+    gPegasusReady = YES;
+    %init(PegasusHooks);
+    PIPLog(@"Pegasus hooks installed");
+}
 
 %ctor {
     pipReadPrefs();
     %init;
+    pipInitPegasusOnce();   // 若已加载则此刻挂上；否则等 PiP 起来由 loadView 补挂
     // 设置面板翻任何开关都会 post 这个 darwin 通知 → 立即重读偏好并热更新外框（无需 respring）
     CFNotificationCenterAddObserver(
         CFNotificationCenterGetDarwinNotifyCenter(), NULL,
