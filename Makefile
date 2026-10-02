@@ -20,6 +20,11 @@ PiPBar_CFLAGS := -fobjc-arc -Werror
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
+# 设置面板子工程（编译型 PreferenceLoader bundle，范式照搬 mapadkiller：
+# 自定义控制器直写全局 plist，绕开 roothide per-app 容器隔离）
+SUBPROJECTS = Preferences
+include $(THEOS_MAKE_PATH)/aggregate.mk
+
 after-install::
 	@echo "PiPBar: installed. Respring, then start a Picture-in-Picture video."
 	@killall -9 SpringBoard 2>/dev/null || true

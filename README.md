@@ -25,14 +25,15 @@
    | 项 | 默认 | 说明 |
    |---|---|---|
    | 启用 | 开 | 关掉后完全不注入，等于没装 |
-   | 显示外框 | 开 | 顶部/左右边条；关掉后只留底部 |
+   | 显示外框 | 开 | 圆角「手机壳」：顶/左右同宽 |
    | 显示控制按钮 | 开 | 底部三颗：上一曲 / 播放暂停 / 下一曲 |
-   | 外框宽度 | 12 | 4–24 pt，顶部与左右同宽 |
+   | 外框宽度 | 12 | 4–24 pt |
    | 底部高度 | 40 | 28–80 pt，比左右宽的那条 |
    | 文件日志 | 关 | 打开后写 `/var/mobile/Library/Logs/PiPBar.log` |
-   | 调试日志 | 关 | 打开后额外打 `HIER` 视图层级树（排查画错位时用） |
+   | 调试日志 | 关 | 额外打 `HIER` 视图层级树（排查画错位时用） |
 
    改任意一项**不用 respring**，走 Darwin 通知即时热生效。
+   **面板本身装完第一次 respring 后才会出现；若没有，把设置 App 上划杀掉再开。**
 
 3. 播放任意支持画中画的视频（Safari/腾讯视频/B站等）→ 上滑触发 PiP，
    出现即自动套上外框；拖动、单击展开、双击缩放等原生手势保持可用。
@@ -59,11 +60,13 @@
 ## 版本
 
 - v0.1：外框 + 播放/暂停（Pegasus 命令通道）+ 嗅探日志
-- v0.2：设置面板（启用/外框/按钮/宽度/高度/日志，翻开关即时热生效）+
-  文件日志（/var/mobile/Library/Logs/PiPBar.log）+ 外框挂载层改三级择优
-  （强信号扫描 → KVC ivar → 弱信号扫描 → 回退）+ layoutSubviews 自愈贴合父 bounds +
-  hitTest 覆写（透明覆盖层不再吃掉 PiP 原生拖动/单击/双击）+ Pegasus 钩子拆独立 %group
-- v0.3（计划）：接通上一曲/下一曲（等真机 CMD 嗅探日志拿 playbackAction 码）
+- v0.2：设置面板（plist-only bundle）+ 文件日志 + 挂载层三级择优 + layoutSubviews 自愈 +
+  hitTest 覆写 + Pegasus 钩子拆独立 %group
+  （遗留：面板在 roothide 下不显示、按钮 0×0 不可见、直角边条不好看）
+- v0.3：设置面板改自包含 plist（PreferenceLoader/Preferences/，零 bundle 依赖，roothide 可见）+
+  外框改 CAShapeLayer even-odd 圆角壳（圆角跟随宿主）+ 按钮显式 frame 56x44 实修 +
+  按钮直挂 self（底部条不再吞触摸）
+- v0.4（计划）：接通上一曲/下一曲（等真机 CMD 嗅探日志拿 playbackAction 码）
 
 ## 设置
 
