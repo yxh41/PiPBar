@@ -1,0 +1,126 @@
+name: Build PiPBar (roothide)
+
+# 与 yxh41/mapadkiller-ios 相同的流水线：
+#   roothide/theos + 最新 iPhoneOS SDK + 单 commit 推送（re/_push_single.py）+ 手动触发。
+# 不用 on: push：contents API 一个文件一个 commit 会触发 N 次半成品构建。
+
+on:
+  workflow_dispatch:
+
+env:
+  THEOS: ${{ github.workspace }}/theos
+
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer 2>/dev/null || true
+
+      - name: Install dependencies
+        run: |
+          brew install dpkg ldid gnu-sed findutils coreutils xz
+          cpanm -n IO::Compress::Lzma 2>/dev/null || true
+
+      - name: Install Theos (roothide fork)
+        run: |
+          git clone --recursive https://github.com/roothide/theos.git "$THEOS"
+          for f in logos.pl dm.pl; do
+            [ -e "$THEOS/bin/$f" ] && continue
+            case "$f" in
+              logos.pl) curl -fsSL https://raw.githubusercontent.com/theos/logos/master/logos.pl -o "$THEOS/bin/logos.pl" ;;
+              dm.pl)    curl -fsSL https://raw.githubusercontent.com/theos/dm.pl/master/dm.pl    -o "$THEOS/bin/dm.pl" ;;
+            esac
+            chmod +x "$THEOS/bin/$f"
+          done
+
+      - name: Install SDKs
+        run: |
+          rm -rf "$THEOS/sdks"
+          git clone --depth=1 https://github.com/theos/sdks.git "$THEOS/sdks"
+          ls -1 "$THEOS/sdks/" | grep -i iphone
+
+      - name: Detect SDK version
+        run: |
+          SDK=$(ls "$THEOS/sdks/" | grep -o 'iPhoneOS[0-9.]*\.sdk' | sed 's/iPhoneOS//;s/\.sdk//' | sort -V | tail -1)
+          echo "Detected latest SDK: $SDK"
+          sed -i '' "s/TARGET := iphone:clang:.*/TARGET := iphone:clang:$SDK:15.0/" Makefile
+          grep '^TARGET' Makefile
+
+      - name: Stamp build tag + version with git hash
+        run: |
+          HASH=$(git rev-parse --short=7 HEAD 2>/dev/null || echo dev)
+          echo "commit hash: $HASH"
+          sed -i '' "s|^Version:.*|Version: 0.0.1+$HASH|" control
+          echo "control Version -> $(grep '^Version:' control)"
+          sed -i '' -E "s|^#define PIP_BUILD_TAG @\"([^\"+]*)(\+[^\"]*)?\"|#define PIP_BUILD_TAG @\"\1+$HASH\"|" Tweak.x
+          echo "build tag -> $(grep '^#define PIP_BUILD_TAG' Tweak.x)"
+          grep '^#define PIP_BUILD_TAG' Tweak.x || { echo "::error::PIP_BUILD_TAG not found"; exit 1; }
+
+      - name: Build roothide .deb
+        run: |
+          set -o pipefail
+          make clean
+          make package FINALPACKAGE=1 THEOS_ENV=silent 2>&1 | tee ci-build.log \
+            || make package FINALPACKAGE=1 2>&1 | tee ci-build.log
+          grep -iE "error:|undeclared identifier|No such file" ci-build.log | sed 's|^|::error::|' || true
+          ROOTHIDE_DEB=$(ls packages/*_iphoneos-arm64e.deb 2>/dev/null | head -n1)
+          if [ -z "$ROOTHIDE_DEB" ]; then
+            echo "::error::No iphoneos-arm64e .deb produced"
+            exit 1
+          fi
+          echo "ROOTHIDE_DEB=$ROOTHIDE_DEB" >> "$GITHUB_ENV"
+          dpkg-deb -I "$ROOTHIDE_DEB" | head -20
+
+      - name: Upload build log (diagnostics)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-build-log
+          path: ci-build.log
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload roothide .deb
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipbar-deb
+          path: packages/*_iphoneos-arm64e.deb
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish .deb via git (fallback)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.email "ci@pipbar.local"
+          git config user.name "PiPBar CI"
+          SHA=$(git rev-parse --short=7 HEAD)
+          TMP=$(mktemp -d)
+          if [ -n "$ROOTHIDE_DEB" ] && [ -f "$ROOTHIDE_DEB" ]; then
+            cp "$ROOTHIDE_DEB" "$TMP/pipbar_${SHA}.deb"
+          fi
+          [ -f ci-build.log ] && cp ci-build.log "$TMP/ci-build.log"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/yxh41/PiPBar.git"
+          git fetch origin deb-artifacts 2>/dev/null || true
+          git checkout --orphan deb-artifacts
+          git reset --hard
+          git clean -fdx >/dev/null 2>&1 || true
+          mkdir -p out
+          cp "$TMP"/* out/ 2>/dev/null || true
+          git add out 2>/dev/null || true
+          git commit -m "build ${SHA}" >/dev/null 2>&1 || echo "nothing to commit"
+          if git push --force origin deb-artifacts; then
+            echo "::notice::published deb to deb-artifacts"
+          else
+            echo "::error::deb-artifacts publish FAILED"
+            exit 1
+          fi
