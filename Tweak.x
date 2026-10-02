@@ -119,32 +119,34 @@ static BOOL gPlaying = YES;   // 最近一次已知的播放状态
 
 #pragma mark - 外框 + 按钮条
 
+// 造型对齐参考图（安卓 PiP 同款）：黑色圆角「手机壳」——
+//   顶部/左右 = gFrameW 同宽，底部 = gBarH 加宽放三颗按钮，外圈圆角贴 PiP 本身的圆角。
+// 实现：单层 CAShapeLayer + even-odd 挖洞（外圈圆角矩形 - 内圈圆角矩形），
+// 中间完全透明让视频透出来。v0.2 的四条矩形边条没有圆角、贴不上 PiP 的圆角造型。
 @interface PIPFrameView : UIView
 @property (nonatomic, copy) void (^onTap)(NSInteger tag);
-@property (nonatomic, strong) UIView *topBar, *leftBar, *rightBar, *bottomBar;
+@property (nonatomic, strong) CAShapeLayer *caseLayer;
 @end
 
 @implementation PIPFrameView
+
++ (Class)layerClass {
+    return [CAShapeLayer class];
+}
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
         self.backgroundColor = UIColor.clearColor;
-        self.clipsToBounds = NO;
-        UIColor *bar = [UIColor colorWithWhite:0.10 alpha:1.0];
-        self.topBar = [[UIView alloc] initWithFrame:CGRectZero];
-        self.leftBar = [[UIView alloc] initWithFrame:CGRectZero];
-        self.rightBar = [[UIView alloc] initWithFrame:CGRectZero];
-        self.bottomBar = [[UIView alloc] initWithFrame:CGRectZero];
-        for (UIView *b in [NSArray arrayWithObjects:self.topBar, self.leftBar,
-                           self.rightBar, self.bottomBar, nil]) {
-            b.backgroundColor = bar;
-            [self addSubview:b];
-        }
+        self.clipsToBounds = NO;   // 圆角壳不能裁，按钮放大在壳内但图标阴影可能越界
+        self.caseLayer = (CAShapeLayer *)self.layer;
+        self.caseLayer.fillColor = [UIColor colorWithWhite:0.05 alpha:1.0].CGColor;
+        self.caseLayer.fillRule = kCAFillRuleEvenOdd;
+        self.caseLayer.masksToBounds = NO;
         [self addButtonWithTag:1 symbol:@"backward.end.fill"];
         [self addButtonWithTag:2 symbol:@"play.fill"];
         [self addButtonWithTag:3 symbol:@"forward.end.fill"];
-        // 初始就是错位也无所谓 —— layoutSubviews 按当前 bounds 全量重算
+        // 初始错位无所谓 —— layoutSubviews 按当前 bounds 全量重算
         [self setNeedsLayout];
     }
     return self;
@@ -156,14 +158,20 @@ static BOOL gPlaying = YES;   // 最近一次已知的播放状态
     b.tintColor = UIColor.whiteColor;
     UIImage *img = [UIImage systemImageNamed:symbol];
     if (img != nil) {
-        [b setImage:img forState:UIControlStateNormal];
+        // 固定图标大小：跟随系统 Dynamic Type 会忽大忽小
+        UIImage *sized = [img imageWithConfiguration:
+                          [UIImageSymbolConfiguration configurationWithPointSize:20.0]];
+        [b setImage:(sized != nil ? sized : img) forState:UIControlStateNormal];
     } else {
         // SF Symbol 名字漂移时的兜底：不至于是空按钮
         [b setTitle:(tag == 1 ? @"◀◀" : (tag == 2 ? @"▶" : @"▶▶")) forState:UIControlStateNormal];
-        b.titleLabel.font = [UIFont systemFontOfSize:15.0];
+        b.titleLabel.font = [UIFont boldSystemFontOfSize:15.0];
     }
     [b addTarget:self action:@selector(buttonTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [self.bottomBar addSubview:b];
+    // ⚠️ 按钮必须直接挂在 self 上，且给【显式 frame】。
+    // v0.2 踩坑：只设 center —— 用 CGRectZero 创建、translatesAutoresizingMask=YES 的视图
+    // center 设了尺寸仍是 0×0，三颗按钮全部「存在但不可见」。
+    [self addSubview:b];
 }
 
 - (void)buttonTapped:(UIButton *)sender {
@@ -172,14 +180,14 @@ static BOOL gPlaying = YES;   // 最近一次已知的播放状态
 
 // 我们是铺满整块视频区的透明覆盖层。若不拦这一刀，命中会落到 self 上，
 // PiP 原生的「拖动 / 单击展开 / 双击缩放」就全被吃掉了。
-// 这里只放行落在【边条或按钮】上的触摸，其余一律穿透回 Pegasus。
+// 按钮是 self 的直接子视图：落在按钮上 hit 返回按钮（放行），其余一律穿透回 Pegasus。
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
     return (hit == self) ? nil : hit;
 }
 
 // 全部按【当前 bounds + 当前偏好】重算 —— 偏好热更新也走这里（setNeedsLayout）
-// 挂在他人 Landfield 上时 bounds 可能在安装瞬间还是 0（autoresize 救不回来）。
+// 挂在他人图层上时 bounds 可能在安装瞬间还是 0（autoresize 救不回来）。
 // 所以把「贴合父视图」放进 layoutSubviews 自愈 —— 每次布局先看一眼父 bounds。
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -195,25 +203,47 @@ static BOOL gPlaying = YES;   // 最近一次已知的播放状态
     CGFloat h = CGRectGetHeight(self.bounds);
     CGFloat sw = gFrameW, bh = gBarH;
     if (w <= 0.0 || h <= 0.0) return;
+    if (h < sw + bh + 4.0) {              // 视频太小放不下壳，宁可不画也不画成糊的
+        self.caseLayer.path = nil;
+        for (UIView *v in self.subviews) {
+            if ([v isKindOfClass:[UIButton class]]) v.hidden = YES;
+        }
+        return;
+    }
 
-    self.hidden = !gShowFrame && !gShowButtons;
-    self.topBar.hidden = self.leftBar.hidden = self.rightBar.hidden = !gShowFrame;
-    // 只开按钮、关外框时底条仍要露出来，否则按钮无处安放
-    self.bottomBar.hidden = !gShowFrame && !gShowButtons;
+    self.hidden = !gEnabled || (!gShowFrame && !gShowButtons);
 
-    self.topBar.frame = CGRectMake(0, 0, w, sw);
-    CGFloat midH = h - sw - bh;
-    self.leftBar.frame = CGRectMake(0, sw, sw, midH > 0.0 ? midH : 0.0);
-    self.rightBar.frame = CGRectMake(w - sw, sw, sw, midH > 0.0 ? midH : 0.0);
-    self.bottomBar.frame = CGRectMake(0, h - bh, w, bh);
+    // —— 圆角壳：圆角优先取宿主自己的 cornerRadius，取不到用 18 ——
+    CGFloat r = sup.layer.cornerRadius;
+    if (r < 2.0 || r > 40.0) r = 18.0;
+    CGFloat ri = r - sw > 2.0 ? r - sw : 2.0;   // 内圈圆角随边宽收窄
 
-    // 三颗按钮均分在底部控制条：0.20 / 0.50 / 0.80 宽度处
+    self.caseLayer.hidden = !gShowFrame;
+    if (gShowFrame) {
+        CGRect inner = CGRectMake(sw, sw, w - sw * 2.0, h - sw - bh);
+        if (inner.size.width > 4.0 && inner.size.height > 4.0) {
+            UIBezierPath *outer = [UIBezierPath bezierPathWithRoundedRect:self.bounds
+                                                             cornerRadius:r];
+            UIBezierPath *innerP = [UIBezierPath bezierPathWithRoundedRect:inner
+                                                              cornerRadius:ri];
+            [outer appendPath:innerP];   // even-odd：中间挖空，视频透出来
+            self.caseLayer.path = outer.CGPath;
+        }
+    } else {
+        self.caseLayer.path = nil;
+    }
+
+    // —— 底部控制条上的三颗按钮：0.20 / 0.50 / 0.80 宽度处，显式 56x44 实体尺寸 ——
     CGFloat xs[3] = {0.20, 0.50, 0.80};
+    CGFloat btnW = 56.0, btnH = 44.0;
+    CGFloat by = h - bh + (bh - btnH) / 2.0;
+    if (by < h - btnH) by = h - btnH;
     NSUInteger i = 0;
-    for (UIView *v in self.bottomBar.subviews) {
-        if (i > 2) break;
+    for (UIView *v in self.subviews) {
+        if (![v isKindOfClass:[UIButton class]]) continue;
+        CGFloat cx = w * xs[i];
         v.hidden = !gShowButtons;
-        v.center = CGPointMake(w * xs[i], bh / 2.0);
+        v.frame = CGRectMake(cx - btnW / 2.0, by, btnW, btnH);   // 必须 frame，不是 center（v0.2 踩坑）
         i++;
     }
 }
@@ -355,9 +385,7 @@ static void pipApplyFrameState(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         PIPFrameView *f = gInstalledFrame;
         if (f == nil) return;
-        f.hidden = !gEnabled || !gShowFrame;
-        for (UIView *v in f.bottomBar.subviews) v.hidden = !gShowButtons;
-        [f setNeedsLayout];
+        [f setNeedsLayout];   // hidden 逻辑全在 layoutSubviews 里按当前偏好算
         PIPLog(@"reload applied: enabled=%d frame=%d buttons=%d w=%.0f barh=%.0f",
                gEnabled, gShowFrame, gShowButtons, (double)gFrameW, (double)gBarH);
     });
