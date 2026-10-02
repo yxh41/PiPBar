@@ -27,9 +27,9 @@
 #define PIPLog(fmt, ...) NSLog(@"[PiPBar " PIP_BUILD_TAG "] " fmt, ##__VA_ARGS__)
 
 // —— 布局常量（真机验证后再调；改宽度只动这里）——
+// 注：每个常量都必须真正被用到 —— -Werror 连「未使用的 const」都不放行（v0.1 第二次构建踩过）。
 static const CGFloat kFrameSide = 12.0;    // 顶部 / 左右边框宽
 static const CGFloat kFrameBottom = 40.0;  // 底部（按钮条）高
-static const CGFloat kFrameRadius = 22.0;  // 外框圆角（对齐系统 PiP 圆角，待真机校准）
 
 // —— Pegasus / SpringBoard 私有类（iOS 17 运行时头，16.4.1 待日志确认；全部判空防御）——
 // 注意：这些声明不只是给编译器看的 —— %hook 展开后会直接向 self 发消息，
@@ -54,16 +54,39 @@ static BOOL gPlaying = YES;   // 最近一次已知的播放状态（v0.1 用按
 
 @interface PIPFrameView : UIView
 @property (nonatomic, copy) void (^onTap)(NSInteger tag);
+@property (nonatomic, strong) UIView *bottomBar;
 @end
 
 @implementation PIPFrameView
 
+// 造型（用户参考图：手机壳式外框）——
+//   顶部 / 左右 = kFrameSide 细边，底部 = kFrameBottom 加宽放按钮；
+//   中间镂空不遮视频，边条颜色深灰模拟壳。
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor colorWithWhite:0.10 alpha:1.0];
-        self.layer.cornerRadius = kFrameRadius;
-        self.clipsToBounds = YES;
+        self.backgroundColor = UIColor.clearColor;
+        self.clipsToBounds = NO;
+        CGFloat w = CGRectGetWidth(frame);
+        CGFloat h = CGRectGetHeight(frame);
+        UIColor *bar = [UIColor colorWithWhite:0.10 alpha:1.0];
+
+        UIView *top = [[UIView alloc] initWithFrame:CGRectMake(0, 0, w, kFrameSide)];
+        top.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleBottomMargin;
+        UIView *left = [[UIView alloc] initWithFrame:CGRectMake(0, kFrameSide, kFrameSide,
+                                                                h - kFrameSide - kFrameBottom)];
+        left.autoresizingMask = UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleHeight;
+        UIView *right = [[UIView alloc] initWithFrame:CGRectMake(w - kFrameSide, kFrameSide, kFrameSide,
+                                                                 h - kFrameSide - kFrameBottom)];
+        right.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleHeight;
+        self.bottomBar = [[UIView alloc] initWithFrame:CGRectMake(0, h - kFrameBottom, w, kFrameBottom)];
+        self.bottomBar.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleTopMargin;
+
+        for (UIView *b in [NSArray arrayWithObjects:top, left, right, self.bottomBar, nil]) {
+            b.backgroundColor = bar;
+            [self addSubview:b];
+        }
+
         [self addButtonWithTag:1 symbol:@"backward.end.fill"];
         [self addButtonWithTag:2 symbol:@"play.fill"];
         [self addButtonWithTag:3 symbol:@"forward.end.fill"];
@@ -84,7 +107,7 @@ static BOOL gPlaying = YES;   // 最近一次已知的播放状态（v0.1 用按
         b.titleLabel.font = [UIFont systemFontOfSize:15.0];
     }
     [b addTarget:self action:@selector(buttonTapped:) forControlEvents:UIControlEventTouchUpInside];
-    [self addSubview:b];
+    [self.bottomBar addSubview:b];
 }
 
 - (void)buttonTapped:(UIButton *)sender {
@@ -94,12 +117,12 @@ static BOOL gPlaying = YES;   // 最近一次已知的播放状态（v0.1 用按
 // 三颗按钮均分在底部控制条：0.20 / 0.50 / 0.80 宽度处
 - (void)layoutSubviews {
     [super layoutSubviews];
-    CGFloat cy = CGRectGetHeight(self.bounds) - kFrameBottom / 2.0;
+    CGFloat cy = CGRectGetHeight(self.bottomBar.bounds) / 2.0;
     CGFloat xs[3] = {0.20, 0.50, 0.80};
     NSUInteger i = 0;
-    for (UIView *v in self.subviews) {
+    for (UIView *v in self.bottomBar.subviews) {
         if (i > 2) break;
-        v.center = CGPointMake(CGRectGetWidth(self.bounds) * xs[i], cy);
+        v.center = CGPointMake(CGRectGetWidth(self.bottomBar.bounds) * xs[i], cy);
         i++;
     }
 }
