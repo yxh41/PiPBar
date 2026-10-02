@@ -1,0 +1,82 @@
+{
+    title = "PiPBar";
+    items = (
+        {
+            cell = PSGroupCell;
+            label = "PiPBar 画中画增强";
+            footerText = "给系统画中画加一圈外框：顶部/左右细边，底部加宽为控制条（上一曲 / 播放暂停 / 下一曲）。改任何开关立即生效，无需 respring。";
+        },
+        {
+            cell = PSSwitchCell;
+            defaults = "com.yxh41.pipbar";
+            key = Enabled;
+            label = "启用 PiPBar";
+            default = 1;
+            PostNotification = "com.yxh41.pipbar.reload";
+        },
+        {
+            cell = PSSwitchCell;
+            defaults = "com.yxh41.pipbar";
+            key = ShowFrame;
+            label = "显示外框";
+            default = 1;
+            PostNotification = "com.yxh41.pipbar.reload";
+        },
+        {
+            cell = PSSwitchCell;
+            defaults = "com.yxh41.pipbar";
+            key = ShowButtons;
+            label = "显示控制按钮";
+            default = 1;
+            PostNotification = "com.yxh41.pipbar.reload";
+        },
+        {
+            cell = PSGroupCell;
+            label = "尺寸";
+            footerText = "外框宽度 = 顶部与左右边条的宽度；底部控制条高度独立可调。改完立即生效。";
+        },
+        {
+            cell = PSSliderCell;
+            defaults = "com.yxh41.pipbar";
+            key = FrameWidth;
+            label = "外框宽度（顶/左右）";
+            min = 4;
+            max = 24;
+            showValue = 1;
+            default = 12;
+            PostNotification = "com.yxh41.pipbar.reload";
+        },
+        {
+            cell = PSSliderCell;
+            defaults = "com.yxh41.pipbar";
+            key = BarHeight;
+            label = "底部控制条高度";
+            min = 28;
+            max = 80;
+            showValue = 1;
+            default = 40;
+            PostNotification = "com.yxh41.pipbar.reload";
+        },
+        {
+            cell = PSGroupCell;
+            label = "日志";
+            footerText = "文件日志写到 /var/mobile/Library/Logs/PiPBar.log（Filza 直接翻，超 256KB 自动清空重记）。调试日志会额外打印画中画视图层级，用于校准外框位置。";
+        },
+        {
+            cell = PSSwitchCell;
+            defaults = "com.yxh41.pipbar";
+            key = FileLog;
+            label = "文件日志";
+            default = 0;
+            PostNotification = "com.yxh41.pipbar.reload";
+        },
+        {
+            cell = PSSwitchCell;
+            defaults = "com.yxh41.pipbar";
+            key = DebugLog;
+            label = "调试日志（视图层级）";
+            default = 0;
+            PostNotification = "com.yxh41.pipbar.reload";
+        },
+    );
+}

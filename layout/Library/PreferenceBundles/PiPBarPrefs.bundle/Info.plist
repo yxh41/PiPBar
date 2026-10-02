@@ -1,0 +1,8 @@
+{
+    CFBundleIdentifier = "com.yxh41.pipbar.prefs";
+    CFBundleInfoDictionaryVersion = "6.0";
+    CFBundleName = "PiPBarPrefs";
+    CFBundlePackageType = "BNDL";
+    CFBundleShortVersionString = "0.0.2";
+    CFBundleVersion = "0.0.2";
+}

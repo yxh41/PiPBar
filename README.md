@@ -19,5 +19,18 @@
 
 ## 版本
 
-- v0.1：外框 + 播放/暂停（Pegasus 命令通道）+ 嗅探日志（定位上一曲/下一曲 action 码）
-- v0.2（计划）：接通上一曲/下一曲；外框宽度/颜色设置面板
+- v0.1：外框 + 播放/暂停（Pegasus 命令通道）+ 嗅探日志
+- v0.2：设置面板（启用/外框/按钮/宽度/高度/日志，翻开关即时热生效）+
+  文件日志（/var/mobile/Library/Logs/PiPBar.log）+ 外框挂载层改运行时选择
+  （v0.1 贴在容器层会伸到可见区外，真机截图已证明）+ 边条全部 layoutSubviews 重算
+- v0.3（计划）：接通上一曲/下一曲（等真机 CMD 嗅探日志拿 playbackAction 码）
+
+## 设置
+
+设置 → PiPBar：启用 / 显示外框 / 显示控制按钮 / 外框宽度 / 底部高度 / 文件日志 / 调试日志。
+所有开关走 Darwin 通知（com.yxh41.pipbar.reload），**改完立即生效，无需 respring**。
+
+## 日志
+
+- 文件：`/var/mobile/Library/Logs/PiPBar.log`（设置里开「文件日志」，Filza 直接翻，超 256KB 自动清空重记）
+- syslog：搜 `[PiPBar`

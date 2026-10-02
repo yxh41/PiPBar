@@ -1,0 +1,8 @@
+{
+    entry = {
+        bundle = PiPBarPrefs;
+        cell = PSLinkCell;
+        isController = 1;
+        label = "PiPBar";
+    };
+}
