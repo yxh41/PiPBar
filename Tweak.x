@@ -189,10 +189,20 @@ static void pipDumpMethods(Class c, NSString *where) {
             if (c == nil) return;
             if (tag == 2) {
                 // 播放/暂停：Pegasus 命令通道（iOS 17 头确认，16.4.1 真机验证中）
-                gPlaying = !gPlaying;
-                [(PGPictureInPictureViewController *)c handleCommand:
-                    [PGCommand commandForSetPlaying:gPlaying]];
-                PIPLog(@"play/pause -> setPlaying=%d", gPlaying);
+                // 注意：PGCommand 不能直接写 [PGCommand commandForSetPlaying:] ——
+                // 那会产生链接期类符号 _OBJC_CLASS_$_PGCommand，而 Pegasus 不参与链接，
+                // 直接 Undefined symbols（v0.1 第三次构建踩过）。必须运行时取类。
+                Class cmdCls = objc_getClass("PGCommand");
+                SEL sel = sel_registerName("commandForSetPlaying:");
+                if (cmdCls != nil && [cmdCls respondsToSelector:sel]) {
+                    gPlaying = !gPlaying;
+                    id (*setPlaying)(id, SEL, BOOL) = (id (*)(id, SEL, BOOL))objc_msgSend;
+                    id cmd = setPlaying(cmdCls, sel, gPlaying);
+                    [(PGPictureInPictureViewController *)c handleCommand:cmd];
+                    PIPLog(@"play/pause -> setPlaying=%d", gPlaying);
+                } else {
+                    PIPLog(@"PGCommand/commandForSetPlaying: 不可用（类没加载或选择子漂移）");
+                }
             } else {
                 // 上一曲(1) / 下一曲(3)：action 码待嗅探，v0.2 接通
                 PIPLog(@"button tag=%ld — 等待嗅探结果（见 CMD/SNIFF 日志）", (long)tag);
