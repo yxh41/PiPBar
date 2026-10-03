@@ -26,7 +26,8 @@
    |---|---|---|
    | 启用 | 开 | 关掉后完全不注入，等于没装 |
    | 显示外框 | 开 | 圆角「手机壳」：顶/左右同宽 |
-   | 显示控制按钮 | 开 | 底部三颗：上一曲(−10s 快退) / 播放暂停 / 下一曲(+10s 快进) |
+   | 显示控制按钮 | 开 | 底部三颗：上一个 / 播放暂停 / 下一个（无切歌能力时回退 ±10s） |
+   | 左右键优先切歌 | 开 | 走 MediaRemote 切歌通道；关掉则始终只做 ±10s 快退快进 |
    | 外框宽度 | 8 | 4–24 pt（v0.5 由 12 改 8：顶/左右更细）。下方实时显示当前值 |
    | 底部高度 | 40 | 28–80 pt，比左右宽的那条。下方实时显示当前值 |
    | 文件日志 | 开 | 装完 respring 即有 `/var/mobile/Library/Logs/PiPBar.log` |
@@ -53,9 +54,9 @@
 
 ## 已知限制
 
-- 播放/暂停、上一曲/下一曲（±10s 快退快进）均已可用（v0.7 接通，基于 PGCMD-META
-  实锤的 `commandForPlaybackAction:associatedDoubleValue:`）。画中画无曲目概念，
-  左右键做快退/快进而非切歌。
+- 播放/暂停、左右键均已可用。左右键**优先走 MediaRemote 切歌通道**
+  （`kMRNextTrack`/`kMRPreviousTrack`），App 无切歌能力时自动回退 ±10s 快退/快进
+  （如播放单条网页视频时）。可用设置里的「左右键优先切歌」关掉切歌、只做 ±10s。
 - 只支持系统原生 PiP，App 内自建的假画中画不在射程内。
 - roothide 下设置面板走「编译型 PreferenceLoader bundle + 全局 plist 直写桥」
   （绕过 per-app NSUserDefaults 容器隔离，SpringBoard 才能读到）。
@@ -140,6 +141,23 @@
      `UISlider`，用关联对象标记幂等挂 `UIControlEventValueChanged` target，拖动即刷新；
      数值 cell 双保险刷新（直接改可见 cell 的 label + 更新 spec.name 并 reloadSpecifier）；
      拖动期全局 plist 每帧写但 darwin 通知节流 120ms，避免通知风暴。
+- v0.10：**左右键真正支持「上一个/下一个」**（v0.9 判定"画中画无法切歌"只覆盖了
+  Pegasus 一条通道，实际还有第二条）——
+  ① 新增 **MediaRemote 切歌通道**：画中画自己的 Pegasus 命令只有 skipByInterval/
+     skipToLive/skipPreroll（无 track/next/previous），但锁屏「上/下一曲」按钮走的是
+     mediaserverd 的 `MediaRemote`，系统会把它路由到 App 的
+     `MPRemoteCommandCenter` 的 nextTrack/previousTrack handler —— 走这条能真正切歌。
+     常量出处：`Cykey/ios-reversed-headers · MediaRemote/MediaRemote.h`
+     （`kMRNextTrack=4` / `kMRPreviousTrack=5`，`MRMediaRemoteSendCommand(cmd, nil)`）。
+     实现用 dlopen 私有框架 + dlsym 取函数指针（不链接符号，跨版本安全）。
+  ② **能力探测 + 自动回退**：该头文件**没有** `SupportsNextTrack` 能力键（只有
+     SupportsFastForward15Seconds / SupportsRewind15Seconds / ProhibitsSkip /
+     IsMusicApp / TotalTrackCount），无法精确探测，故用启发式：音乐类 App 或
+     播放列表 >1 首 ⇒ 判为支持切歌，发 `kMRNextTrack/kMRPreviousTrack`；
+     否则回退 Pegasus 的 ±10s 快退快进。日志会打出走了哪条通道及判据。
+     必须调 `MRMediaRemoteKeepAlive()`，否则 now playing 回调不投递、探测永远失灵。
+  ③ 设置新增开关「左右键优先切歌」（默认开）；按钮图标恢复
+     `backward.end.fill`/`forward.end.fill` 切歌语义。
 
 ## 设置
 

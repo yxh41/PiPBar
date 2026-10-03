@@ -62,17 +62,35 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSSegmentCell</string>
+			<key>key</key>
+			<string>ButtonAction</string>
+			<key>label</key>
+			<string>左右键行为</string>
+			<key>default</key>
+			<integer>0</integer>
+			<key>values</key>
+			<array>
+				<string>自动</string>
+				<string>强制切歌</string>
+				<string>±10秒</string>
+			</array>
+			<key>footnote</key>
+			<string>自动：探测到音乐 App / 播放列表才发切歌命令（kMRNextTrack），否则回退 ±10 秒快退快进。「强制切歌」：无条件发切歌命令，若你的 App 支持切歌就会生效、不支持则无反应（可用来验证 App 是否支持）。「±10秒」：始终只做快退快进。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSSwitchCell</string>
 			<key>defaults</key>
 			<string>com.yxh41.pipbar</string>
 			<key>key</key>
-			<string>PreferTrackSkip</string>
+			<string>ExtendHit</string>
 			<key>label</key>
-			<string>左右键优先切歌</string>
+			<string>扩展按钮命中区</string>
 			<key>default</key>
 			<true/>
 			<key>footnote</key>
-			<string>开启后左右键先尝试「上一个/下一个」（MediaRemote kMRPreviousTrack/kMRNextTrack），App 不支持时自动回退 ±10 秒快退快进；关闭则始终只做 ±10 秒快退快进。</string>
+			<string>开启后把画中画窗口的命中区扩展到外框（含底部黑边），这样按钮才能真正放到黑边上并点击。关闭则按钮被强制拉回视频内侧。异常时可关闭。</string>
 		</dict>
 		<dict>
 			<key>cell</key>

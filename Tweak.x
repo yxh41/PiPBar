@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.10"
+#define PIP_BUILD_TAG @"v0.11"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -44,7 +44,8 @@ static BOOL gFileLog = YES;       // 默认开：日志是排障生命线，别�
 static BOOL gDebugLog = NO;
 static CGFloat gFrameW = 8.0;     // 顶/左右边框宽（用户反馈 12 太粗 → 默认 8）
 static CGFloat gBarH = 40.0;      // 底部控制条高
-static BOOL gPreferTrackSkip = YES;  // 左右键优先切歌（MediaRemote），App 不支持时自动回退 ±10s
+static BOOL gExtendHit = YES;        // 扩展命中区：让壳外/底部黑边也能接收触摸（按钮放黑边的前提）
+static int gButtonAction = 0;        // 0=自动(探测切歌) 1=强制切歌(不回退) 2=始终 ±10s
 
 // roothide per-app 容器隔离：Settings 里 CFPreferences 写的域，SpringBoard 读不到
 // （MapAdKiller/Oback 双双踩实）。范式同款：全局 plist 文件直读，两个进程命中同一物理文件。
@@ -63,7 +64,8 @@ static void pipReadPrefs(void) {
     if ((v = pipPref(@"ShowButtons")) != nil) gShowButtons = [v boolValue];
     if ((v = pipPref(@"FileLog")) != nil) gFileLog = [v boolValue];
     if ((v = pipPref(@"DebugLog")) != nil) gDebugLog = [v boolValue];
-    if ((v = pipPref(@"PreferTrackSkip")) != nil) gPreferTrackSkip = [v boolValue];
+    if ((v = pipPref(@"ExtendHit")) != nil) gExtendHit = [v boolValue];
+    if ((v = pipPref(@"ButtonAction")) != nil) gButtonAction = [v intValue];
     if ((v = pipPref(@"FrameWidth")) != nil) {
         CGFloat f = [v floatValue];
         if (f >= 2.0 && f <= 30.0) gFrameW = f;
@@ -162,10 +164,11 @@ static void pipEnsureMediaRemote(void) {
         (Boolean (*)(int, id))dlsym(gMRLib, "MRMediaRemoteSendCommand");
     gMRGetNowPlayingInfo =
         (void (*)(dispatch_queue_t, void (^)(CFDictionaryRef)))dlsym(gMRLib, "MRMediaRemoteGetNowPlayingInfo");
+    // ⚠️ 真机实测 iOS 16.4.1 上 MRMediaRemoteKeepAlive 的 dlsym 返回 NULL（符号已不可用）。
+    // 所以不能依赖它：探测不到就探测不到，改由「强制切歌」档让用户自行验证 App 是否支持。
     gMRKeepAlive = (void (*)(void))dlsym(gMRLib, "MRMediaRemoteKeepAlive");
-    // KeepAlive：不调的话 now playing 回调可能不投递 ⇒ 能力探测永远判「不支持」而退回 ±10s
     if (gMRKeepAlive != NULL) gMRKeepAlive();
-    PIPLog(@"MR loaded: send=%p getInfo=%p keepAlive=%p",
+    PIPLog(@"MR loaded: send=%p getInfo=%p keepAlive=%p（keepAlive=0x0 属 iOS 16 正常，不影响发命令）",
            (void *)gMRSendCommand, (void *)gMRGetNowPlayingInfo, (void *)gMRKeepAlive);
 }
 
@@ -200,9 +203,11 @@ static BOOL pipMRCanTrackSkip(void) {
 }
 
 // 返回 YES 表示已用切歌通道发出；NO 表示应回退 Pegasus ±10s
+// gButtonAction: 0=自动(探测) 1=强制切歌(不回退) 2=始终 ±10s
 static BOOL pipSendTrackSkip(BOOL forward) {
-    if (gMRSendCommand == NULL || !gPreferTrackSkip) return NO;
-    if (!pipMRCanTrackSkip()) return NO;
+    if (gMRSendCommand == NULL) return NO;
+    if (gButtonAction == 2) return NO;                 // 始终 ±10s
+    if (gButtonAction == 0 && !pipMRCanTrackSkip()) return NO;   // 自动：探测不到就回退
     // kMRNextTrack = 4 / kMRPreviousTrack = 5（userInfo 传 nil）
     return gMRSendCommand(forward ? 4 : 5, nil) ? YES : NO;
 }
@@ -237,18 +242,92 @@ static BOOL gPickQuiet = NO;
 #define PIP_PICK_LOG(fmt, ...) do { if (!gPickQuiet) PIPLog(fmt, ##__VA_ARGS__); } while (0)
 static int gTickN = 0;   // 真宿主未找到时的重扫节流计数（每 5 帧 ≈ 12Hz）
 
-// 造型对齐参考图（安卓 PiP 同款）：黑色圆角「手机壳」**套在视频外面**——
-//   视频矩形不动，壳画在容器层、向外扩：顶/左右 = gFrameW，底部 = gBarH。
-// 实现：CAShapeLayer even-odd（外圈圆角矩形挖掉【视频矩形】这个洞）+ 内沿发丝高光 + 投影。
-// 注意：shadowPath 必须只用外圈路径 —— v0.4 用带洞路径当 shadowPath，投影顺着洞
-// 投进视频区，画面像蒙了层黑遮罩（v0.5 用户反馈实锤）。
 @interface PIPFrameView : UIView
 @property (nonatomic, strong) CAShapeLayer *caseLayer;
 @property (nonatomic, strong) CAShapeLayer *edgeLayer;
 @property (nonatomic, strong) CAShapeLayer *barLayer;
 @property (nonatomic, copy) void (^onTap)(NSInteger tag);
+// v0.11：外框矩形（本壳坐标系，含底部黑边）—— 供 pointInside 扩展命中区用
+@property (nonatomic, assign) CGRect hitRect;
 - (void)pipSelfHeal;
 @end
+
+// —— 命中区扩展（v0.11）——
+// 根因（v0.5 三按钮点不到、v0.9 按钮不敢放黑边的共同根因）：PiP 窗口的 hitTest
+// 只在自己 bounds 内分发，壳画在窗口外的部分（顶部/侧边/底部黑边）虽然**能渲染**
+// （clipsToBounds=NO），但**收不到触摸**。
+// 破解：swizzle 画布（PGHitTestExtendableView）与 PiP 窗口（PGHostedWindow）的
+// -pointInside:withEvent:，让「落在壳的外框矩形内」也算命中 —— 于是壳的 hitTest
+// 能被调用到，按钮放在底部黑边也照样可点。只影响我们壳所占的那块区域，
+// 其余区域一律走原实现（不劫持任何系统手势）。
+static BOOL (*pipOrigPointInside)(id, SEL, CGPoint, UIEvent *) = NULL;
+static Class gHitSwizzled[4];
+static BOOL (*gHitOrig[4])(id, SEL, CGPoint, UIEvent *) = {NULL, NULL, NULL, NULL};
+static int gHitSwizzleCount = 0;
+
+static BOOL pipHitInsideFrame(id self, CGPoint point) {
+    if (!gExtendHit) return NO;
+    PIPFrameView *f = gInstalledFrame;
+    if (f == nil || f.hidden || f.hitRect.size.width < 1.0) return NO;
+    if (![f isDescendantOfView:(UIView *)self]) return NO;
+    CGRect hr = [f convertRect:f.hitRect toView:(UIView *)self];
+    return CGRectContainsPoint(hr, point);
+}
+
+// 取该对象应走的原实现（按类精确匹配，继承来的用 UIView 的）
+static BOOL (*pipOrigForObject(id obj))(id, SEL, CGPoint, UIEvent *) {
+    Class c = object_getClass(obj);
+    for (int i = 0; i < gHitSwizzleCount; i++) {
+        if (gHitSwizzled[i] == c && gHitOrig[i] != NULL) return gHitOrig[i];
+    }
+    return pipOrigPointInside;
+}
+
+static BOOL pipPIPPointInside(id self, SEL _cmd, CGPoint point, UIEvent *event) {
+    BOOL (*orig)(id, SEL, CGPoint, UIEvent *) = pipOrigForObject(self);
+    if (orig != NULL && orig(self, _cmd, point, event)) return YES;
+    return pipHitInsideFrame(self, point);
+}
+
+// 注意：class_getInstanceMethod 对「未自身实现」的类会返回【继承来的】Method，
+// 直接 method_setImplementation 会污染 UIView —— 故这里先判断是否自身实现：
+//   自身实现 → method_setImplementation（保留原语义，存进 gHitOrig）
+//   继承而来 → class_addMethod 覆盖一份（UIView 原实现保持不变）
+static void pipSwizzlePointInsideOn(Class cls) {
+    if (cls == Nil) return;
+    for (int i = 0; i < gHitSwizzleCount; i++) {
+        if (gHitSwizzled[i] == cls) return;
+    }
+    if (gHitSwizzleCount >= 4) return;
+
+    SEL sel = @selector(pointInside:withEvent:);
+    const char *types = "c@:@?";   // BOOL (self, _cmd, CGPoint, UIEvent*)
+    BOOL own = NO;
+    unsigned int n = 0;
+    Method *ms = class_copyMethodList(cls, &n);
+    for (unsigned int i = 0; i < n; i++) {
+        if (sel_isEqual(method_getName(ms[i]), sel)) { own = YES; break; }
+    }
+    free(ms);
+
+    if (own) {
+        Method m = class_getInstanceMethod(cls, sel);
+        gHitOrig[gHitSwizzleCount] = (BOOL (*)(id, SEL, CGPoint, UIEvent *))method_getImplementation(m);
+        method_setImplementation(m, (IMP)pipPIPPointInside);
+    } else {
+        class_addMethod(cls, sel, (IMP)pipPIPPointInside, types);
+        gHitOrig[gHitSwizzleCount] = NULL;   // 走 pipOrigPointInside（UIView 原实现）
+    }
+    gHitSwizzled[gHitSwizzleCount++] = cls;
+    PIPLog(@"hit swizzle: %@（自身实现=%d）", NSStringFromClass(cls), own);
+}
+
+// 造型对齐参考图（安卓 PiP 同款）：黑色圆角「手机壳」**套在视频外面**——
+//   视频矩形不动，壳画在容器层、向外扩：顶/左右 = gFrameW，底部 = gBarH。
+// 实现：CAShapeLayer even-odd（外圈圆角矩形挖掉【视频矩形】这个洞）+ 内沿发丝高光 + 投影。
+// 注意：shadowPath 必须只用外圈路径 —— v0.4 用带洞路径当 shadowPath，投影顺着洞
+// 投进视频区，画面像蒙了层黑遮罩（v0.5 用户反馈实锤）。
+// （@interface PIPFrameView 已上移到命中区 swizzle 之前声明）
 
 // 缓存图标：play/pause 随播放状态切换（v0.3 用户反馈「播放暂停不会变化」）
 static UIImage *pipIcon(BOOL playing) {
@@ -339,6 +418,14 @@ static UIImage *pipIcon(BOOL playing) {
     return (hit == self) ? nil : hit;
 }
 
+// v0.11：本壳画到窗口外（底部黑边）的那部分默认收不到触摸 —— 这里把 hitRect
+// 也算作命中，使「壳的 hitTest 能被调用到」，按钮放黑边才可点。
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    if ([super pointInside:point withEvent:event]) return YES;
+    if (self.hidden || self.hitRect.size.width < 1.0) return NO;
+    return CGRectContainsPoint(self.hitRect, point);
+}
+
 // 自愈：安装瞬间父 bounds 可能是 0，autoresize 救不回来 —— 每次布局先对齐父 bounds
 - (void)pipSelfHeal {
     UIView *sup = self.superview;
@@ -378,6 +465,8 @@ static UIImage *pipIcon(BOOL playing) {
 
     CGRect outer = CGRectMake(CGRectGetMinX(vr) - sw, CGRectGetMinY(vr) - sw,
                               vrW + sw * 2.0, vrH + sw + bh);
+    // 命中区 = 整个外框（含底部黑边）—— 供 pointInside 扩展用
+    self.hitRect = outer;
 
     // 圆角：内洞贴视频自身圆角，外圈随边宽外扩
     CGFloat innerR = host.layer.cornerRadius;
@@ -398,36 +487,31 @@ static UIImage *pipIcon(BOOL playing) {
         self.edgeLayer.path = nil;
     }
 
-    // —— 按钮条：骑跨视频下沿（v0.9）——
-    // ⚠️ iOS 硬约束：PiP 窗口边界 == 视频矩形（日志实测 PGHitTestExtendableView 与
-    // PGLayerHostView 同为 170x302.33），窗口外坐标不进入 hitTest —— 这正是 v0.5
-    // 「按钮点不到」被推翻重做的根因。故按钮本体必须留在窗口内；折中做法是
-    // **胶囊条视觉上向下溢出、骑在外框底部黑边上**，按钮中心仍压在视频下沿以内。
+    // —— 按钮条：放进【底部黑边】（v0.11）——
+    // 配合 pointInside 命中区扩展，底部黑边里的按钮现在真的可点（v0.5 的死结已破）。
+    // 之前不敢放这里，是因为窗口外收不到触摸；现在壳/画布/窗口三层都扩展了命中区。
     BOOL showBar = gShowButtons && !gExpandedUI;
-    CGFloat barH = 34.0, inset = 8.0;
-    CGRect barRect = CGRectZero;      // 胶囊视觉矩形（可溢出到黑边）
-    CGRect btnRow = CGRectZero;      // 按钮排布矩形（严格在窗口内）
+    CGFloat inset = 8.0;
+    CGRect barRect = CGRectZero;
     self.barLayer.hidden = !showBar;
     if (showBar) {
-        // 视觉胶囊：上沿在视频底部往上 barH，下沿向下溢出 overflow（压进黑色底边）
-        CGFloat overflow = MIN(bh * 0.55, 22.0);
+        // 黑边区 = 视频下沿往下 bh（bh 由设置控制，默认 40，最小 28）
+        CGFloat chin = MAX(bh, 26.0);
+        CGFloat capH = MAX(chin - 6.0, 18.0);
         barRect = CGRectMake(CGRectGetMinX(vr) + inset,
-                             CGRectGetMaxY(vr) - barH,
-                             vrW - inset * 2.0, barH + overflow);
+                             CGRectGetMaxY(vr) + (chin - capH) / 2.0,
+                             vrW - inset * 2.0, capH);
         self.barLayer.path =
             [UIBezierPath bezierPathWithRoundedRect:barRect
-                                       cornerRadius:barH / 2.0].CGPath;
-        // 按钮行：整体上移 overflow 的一半，保证三颗都落在视频矩形内（可点）
-        btnRow = CGRectMake(CGRectGetMinX(barRect),
-                            CGRectGetMinY(barRect) + overflow * 0.5,
-                            CGRectGetWidth(barRect), barH);
+                                       cornerRadius:CGRectGetHeight(barRect) / 2.0].CGPath;
     } else {
         self.barLayer.path = nil;
     }
 
     CGFloat xs[3] = {0.22, 0.50, 0.78};
-    CGFloat btnW = 44.0, btnH = 28.0;
-    CGFloat by = CGRectGetMinY(btnRow) + (CGRectGetHeight(btnRow) - btnH) / 2.0;
+    CGFloat btnH = MIN(30.0, MAX(CGRectGetHeight(barRect) - 4.0, 18.0));
+    CGFloat btnW = 44.0;
+    CGFloat by = CGRectGetMinY(barRect) + (CGRectGetHeight(barRect) - btnH) / 2.0;
     NSUInteger i = 0;
     for (UIView *v in self.subviews) {
         if (![v isKindOfClass:[UIButton class]]) continue;
@@ -481,6 +565,12 @@ static UIImage *pipIcon(BOOL playing) {
     // v0.10：切歌能力探测（2 秒节流，内部已限频；只是读 mediaserverd 的 now playing 标量）
     pipEnsureMediaRemote();
     pipMRRefresh();
+
+    // v0.11：装壳时若还没进窗口（canvas.window == nil），这里补 swizzle PiP 窗口
+    if (gExtendHit && gInstalledFrame != nil) {
+        UIWindow *w = gInstalledFrame.window;
+        if (w != nil) pipSwizzlePointInsideOn(w.class);
+    }
 
     if (host == nil || host.window == nil) return;
     // 当前视频矩形（本画布坐标），与 layoutSubviews 算法完全一致
@@ -752,6 +842,26 @@ static void pipInitPegasusOnce(void);
         [canvas bringSubviewToFront:frame];
         gInstalledFrame = frame;
         pipEnsureSyncLink();   // v0.7：无卡顿心跳，保证 host 解析就绪后外框持续重画
+
+        // v0.11：命中区扩展 —— 壳画在窗口外（底部黑边）也能收触摸，按钮才敢放黑边。
+        // 捕获 UIView 的原始 pointInside 作为兜底原实现，再分别 swizzle 画布与 PiP 窗口。
+        if (pipOrigPointInside == NULL) {
+            Method um = class_getInstanceMethod([UIView class], @selector(pointInside:withEvent:));
+            if (um != NULL) {
+                pipOrigPointInside = (BOOL (*)(id, SEL, CGPoint, UIEvent *))method_getImplementation(um);
+            }
+        }
+        pipSwizzlePointInsideOn(canvas.class);
+        UIWindow *win = canvas.window;
+        if (win != nil) {
+            pipSwizzlePointInsideOn(win.class);
+            PIPLog(@"hit canvas=%@ win=%@ winBounds=%@ winFrame=%@",
+                   NSStringFromClass(canvas.class), NSStringFromClass(win.class),
+                   NSStringFromCGRect(win.bounds), NSStringFromCGRect(win.frame));
+        } else {
+            PIPLog(@"hit canvas=%@ win=nil（尚未入窗口，稍后由 tick 补 swizzle）",
+                   NSStringFromClass(canvas.class));
+        }
         gInstalledHostDesc = [NSString stringWithFormat:@"%@ over %@ (video=%@)",
                               NSStringFromClass(frame.class), NSStringFromClass(canvas.class),
                               NSStringFromClass(videoHost.class)];
