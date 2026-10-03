@@ -84,6 +84,14 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSStaticTextCell</string>
+			<key>label</key>
+			<string>外框宽度：当前 8 pt</string>
+			<key>key</key>
+			<string>FrameWidthVal</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSSliderCell</string>
 			<key>defaults</key>
 			<string>com.yxh41.pipbar</string>
@@ -103,6 +111,14 @@
 			<real>40</real>
 			<key>footnote</key>
 			<string>单位 pt：视频底部黑边的厚度。控制按钮（上一曲/播放/下一曲）另叠加在视频底部内侧。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSStaticTextCell</string>
+			<key>label</key>
+			<string>底部高度：当前 40 pt</string>
+			<key>key</key>
+			<string>BarHeightVal</string>
 		</dict>
 		<dict>
 			<key>cell</key>

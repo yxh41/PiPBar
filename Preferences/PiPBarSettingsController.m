@@ -11,23 +11,19 @@
 #import <Preferences/PSSpecifier.h>
 #import <objc/runtime.h>
 #import "PiPBarPrefsBridge.h"
-#import "PiPBarSliderCell.h"
 
 // ⚠️ roothide 的 PSListController.h 未公开声明 setPreferenceValue:forSpecifier:，
 // 但 PreferenceLoader 运行时确实实现该方法；补前向声明让 [super setPreferenceValue:...]
 // 通过 -Werror 编译（否则报 "no visible @interface declares the selector"）。
 @interface PSListController (PIPSetPrefForward)
 - (void)setPreferenceValue:(id)value forSpecifier:(PSSpecifier *)specifier;
+- (void)reloadSpecifier:(PSSpecifier *)specifier;
 @end
 
 // PSSpecifier 头未声明 setProperty:forKey:，补声明以直接调用（避免 -Werror 告警）
 @interface PSSpecifier (PIPSetProp)
 - (void)setProperty:(id)property forKey:(NSString *)key;
-@end
-
-// PSSpecifier 头未声明 setCellClass:，自定义滑块单元格靠它注册（避免 -Werror 告警）
-@interface PSSpecifier (PIPCellClass)
-- (void)setCellClass:(Class)c;
+- (id)propertyForKey:(NSString *)key;
 @end
 
 @implementation PiPBarSettingsController
@@ -35,18 +31,38 @@
 - (NSArray *)specifiers {
     if (!_specifiers) {
         _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
-        // v0.7：两个滑块改用自绘数值的 PiPBarSliderCell（roothide 私有 PSSliderCell
-        // 不渲染当前值，且 reload 会打断拖动手势）。右侧 UILabel 实时显示「X pt」。
-        for (PSSpecifier *spec in _specifiers) {
-            NSString *key = [spec propertyForKey:@"key"];
-            if ([key isEqualToString:@"FrameWidth"] || [key isEqualToString:@"BarHeight"]) {
-                if ([spec respondsToSelector:@selector(setCellClass:)]) {
-                    [spec setCellClass:[PiPBarSliderCell class]];
-                }
-            }
-        }
     }
     return _specifiers;
+}
+
+// 滑块 key → 配对「实时数值」静态 cell 的 key
+- (NSString *)pipStaticKeyForSlider:(NSString *)sliderKey {
+    if ([sliderKey isEqualToString:@"FrameWidth"]) return @"FrameWidthVal";
+    if ([sliderKey isEqualToString:@"BarHeight"]) return @"BarHeightVal";
+    return nil;
+}
+
+// 在已加载的 specifiers 里按 key 找 specifier
+- (PSSpecifier *)pipSpecWithKey:(NSString *)key {
+    if (!key) return nil;
+    for (PSSpecifier *s in _specifiers) {
+        NSString *k = [s propertyForKey:@"key"];
+        if (k != nil && [k isEqualToString:key]) return s;
+    }
+    return nil;
+}
+
+// 把「当前值」写入滑块下方的静态 cell，并只 reload 该 cell（不重载滑块本身，不打断拖动）
+- (void)pipRefreshValueCellForSlider:(NSString *)sliderKey value:(CGFloat)f {
+    NSString *staticKey = [self pipStaticKeyForSlider:sliderKey];
+    if (staticKey == nil) return;
+    PSSpecifier *st = [self pipSpecWithKey:staticKey];
+    if (st == nil) return;
+    NSString *base = [sliderKey isEqualToString:@"FrameWidth"] ? @"外框宽度" : @"底部高度";
+    st.name = [NSString stringWithFormat:@"%@：当前 %.0f pt", base, f];
+    if ([self respondsToSelector:@selector(reloadSpecifier:)]) {
+        [self reloadSpecifier:st];
+    }
 }
 
 // roothide 下 PSSwitchCell 的标准写入可能落到「设置」App 的 per-app 容器副本，
@@ -55,11 +71,14 @@
     [super setPreferenceValue:value forSpecifier:specifier];
     NSString *key = [specifier propertyForKey:@"key"];
     if (key) pip_setGlobalPref(key, value);
-    // 实时数值由 PiPBarSliderCell 自绘（不走 reload，不打断拖动）
+    // 滑块实时数值：只 reload 下方静态 cell，不碰滑块 cell ⇒ 拖动手势不被打断
+    if ([key isEqualToString:@"FrameWidth"] || [key isEqualToString:@"BarHeight"]) {
+        [self pipRefreshValueCellForSlider:key value:[value floatValue]];
+    }
 }
 
 // 兜底镜像：打开设置页时把各开关当前值从 suite 同步到全局文件，
-// 覆盖「setPreferenceValue: 不被调用」的 roothide 版本。
+// 覆盖「setPreferenceValue: 不被调用」的 roothide 版本；并把两个滑块的当前值刷进静态 cell。
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     if (!_specifiers) [self specifiers];
@@ -70,6 +89,14 @@
         id val = [d objectForKey:key];
         if (val) pip_setGlobalPref(key, val);   // 仅镜像有显式值的 key；nil 跳过
     }
+    // 进入页面即把两个滑块当前值显示到静态 cell（读全局 plist，带默认值兜底）
+    NSDictionary *g = pip_globalPrefs();
+    id fw = g[@"FrameWidth"];
+    id bh = g[@"BarHeight"];
+    [self pipRefreshValueCellForSlider:@"FrameWidth"
+                                 value:fw != nil ? [fw floatValue] : 8.0];
+    [self pipRefreshValueCellForSlider:@"BarHeight"
+                                 value:bh != nil ? [bh floatValue] : 40.0];
 }
 
 @end

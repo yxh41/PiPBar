@@ -27,8 +27,8 @@
    | 启用 | 开 | 关掉后完全不注入，等于没装 |
    | 显示外框 | 开 | 圆角「手机壳」：顶/左右同宽 |
    | 显示控制按钮 | 开 | 底部三颗：上一曲(−10s 快退) / 播放暂停 / 下一曲(+10s 快进) |
-   | 外框宽度 | 8 | 4–24 pt（v0.5 由 12 改 8：顶/左右更细）。滑块右侧实时显示当前值 |
-   | 底部高度 | 40 | 28–80 pt，比左右宽的那条。滑块右侧实时显示当前值 |
+   | 外框宽度 | 8 | 4–24 pt（v0.5 由 12 改 8：顶/左右更细）。下方实时显示当前值 |
+   | 底部高度 | 40 | 28–80 pt，比左右宽的那条。下方实时显示当前值 |
    | 文件日志 | 开 | 装完 respring 即有 `/var/mobile/Library/Logs/PiPBar.log` |
    | 调试日志 | 关 | 额外打 `HIER` 视图层级树（排查画错位时用） |
 
@@ -106,9 +106,10 @@
      安装壳后调用 `pipEnsureSyncLink()`。
   ② **滑块仍无数值**（v0.6 回归）：私有 `PSSliderCell` 不渲染当前值，且 `setPreferenceValue:`
      在拖动中每帧触发、用 reload 刷新标题会打断手势；`spec.name` 改法 roothide 下不刷新单元格。
-     修：新增 `PiPBarSliderCell`（PSSliderCell 子类），右上角自绘 UILabel 实时显示「X pt」，
-     直接监听滑块 `valueChanged` 更新，零 reload、不打断拖动。控制器 `specifiers` 里为
-     FrameWidth/BarHeight 注册 `cellClass`。
+     修：本 theos SDK 的 `PSSliderCell` 是枚举常量（非类，`@class` 与之冲突、无法子类化），
+     故改走稳妥路线——在两个滑块下方各加一个 `PSStaticTextCell`，`setPreferenceValue:` 里
+     只 `reloadSpecifier:` 该静态 cell（不重载滑块本身 ⇒ 拖动手势不被打断），实时显示「X pt」。
+     进入设置页（viewWillAppear）即把当前值刷进静态 cell。
   ③ **上一曲/下一曲接通**：`frame.onTap` 的 tag1/tag3 发 `action=1 + double=∓10`
      （上一曲 −10s / 下一曲 +10s）到 `handleCommand:`，脚注同步标注快退快进语义。
   构建：roothide theos，`-Werror`，无废弃 UIKit API。
