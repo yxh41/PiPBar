@@ -250,7 +250,8 @@ static void pipMRRefresh(void) {
             if (!gSeekBusy) {           // 用户正在拖进度条 ⇒ 不覆盖，避免回跳
                 gMRDuration = dur; gMRElapsed = ela; gMRRate = rate;
                 gMRUpdatedAt = [[NSDate date] timeIntervalSinceReferenceDate];
-                [gInstalledFrame setNeedsLayout];
+                // 进度条由心跳每帧 pipRefreshProgress 更新（它会读上面这几个全局量），
+                // 这里不碰 UI —— gInstalledFrame 在本函数之后才声明，不能在此引用。
             }
             // v0.12：首次拿到（或变化时）打印原始键集 + pid —— 用来判定
             // 「MediaRemote 到底看不看得见这个 App」这个根本问题
@@ -354,6 +355,7 @@ static int gTickN = 0;   // 真宿主未找到时的重扫节流计数（每 5 �
 @property (nonatomic, strong) UILabel *timeLabel;
 @property (nonatomic, strong) UIPanGestureRecognizer *seekPan;
 @property (nonatomic, strong) UITapGestureRecognizer *seekTap;
+@property (nonatomic, copy) void (^onTap)(NSInteger tag);
 // v0.11：外框矩形（本壳坐标系，含底部黑边）—— 供 pointInside 扩展命中区用
 @property (nonatomic, assign) CGRect hitRect;
 // v0.15：拖动中（此时进度由手指决定，不被心跳覆盖）
@@ -597,8 +599,7 @@ static NSString *pipTimeText(double sec) {
 
 // 当前应显示的进度秒数：拖动中由手指决定；否则用上报值 + 线性外推（避免每秒跳一格）
 - (double)pipCurrentSeconds {
-    if (self.seeking) return self.trackRect.width > 0
-        ? gDragTargetSec : 0;
+    if (self.seeking) return CGRectGetWidth(self.trackRect) > 0 ? gDragTargetSec : 0;
     if (gMRDuration <= 0) return 0;
     double e = gMRElapsed;
     if (gMRRate > 0.05 && gMRUpdatedAt > 0) {
