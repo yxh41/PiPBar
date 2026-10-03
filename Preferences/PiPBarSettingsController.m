@@ -24,6 +24,11 @@
 - (void)setProperty:(id)property forKey:(NSString *)key;
 @end
 
+// PSListController 头未声明 readPreferenceValue:（读 specifier 当前值，滑块标题要用）
+@interface PSListController (PIPReadPref)
+- (id)readPreferenceValue:(PSSpecifier *)specifier;
+@end
+
 @implementation PiPBarSettingsController
 
 - (NSArray *)specifiers {
@@ -39,6 +44,23 @@
     [super setPreferenceValue:value forSpecifier:specifier];
     NSString *key = [specifier propertyForKey:@"key"];
     if (key) pip_setGlobalPref(key, value);
+    // v0.6：滑块当前值写进行标题（不 reload 表格 —— reload 会打断拖动手势；
+    // 单元格下次自然重渲染 / 重进页面时即可见）
+    [self pipRefreshSliderTitle:specifier];
+}
+
+// 把两个滑块的标题带上当前值，如「外框宽度（顶/左右边框粗细）: 8 pt」
+- (void)pipRefreshSliderTitle:(PSSpecifier *)spec {
+    NSString *key = [spec propertyForKey:@"key"];
+    if (key == nil) return;
+    id val = [self readPreferenceValue:spec];
+    if (val == nil) return;
+    CGFloat f = [val floatValue];
+    NSString *base = nil;
+    if ([key isEqualToString:@"FrameWidth"])      base = @"外框宽度（顶/左右边框粗细）";
+    else if ([key isEqualToString:@"BarHeight"])  base = @"底部高度（视频下方黑边条）";
+    else return;
+    spec.name = [NSString stringWithFormat:@"%@: %.0f pt", base, f];
 }
 
 // 兜底镜像：打开设置页时把各开关当前值从 suite 同步到全局文件，
@@ -52,6 +74,7 @@
         if (!key) continue;
         id val = [d objectForKey:key];
         if (val) pip_setGlobalPref(key, val);   // 仅镜像有显式值的 key；nil 跳过
+        [self pipRefreshSliderTitle:spec];      // v0.6：滑块标题带上当前值
     }
 }
 

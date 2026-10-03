@@ -84,6 +84,17 @@
   真正的视频宿主 `PGLayerHostView`（`gContentVC` 弱引用持有 content VC）；② 「是否展开」改按
   **视频宽度**判（`vrW > 屏宽*0.6`），不再用画布（content.view）宽度。日志 `build=` 由 v0.2 更正为 v0.5。
   （设置里两个滑块 = **外框宽度** / **底部高度**，见上方表格）
+- v0.6：三修 ——
+  ① **蒙灰**：投影彻底删除。v0.5 把 shadowPath 改成无洞外圈矩形，剪影把整个视频区罩住、
+     35% 黑从透明洞透出来 = 均匀蒙灰（真凶）。质感改由近黑壳 + 内沿发丝高光承担。
+  ② **按钮看不见**：独立悬浮 UIWindow 两轮真机都没渲染出来（iOS 16 无 windowScene 的窗口
+     大概率不显示）→ 删除。按钮改为壳（PIPFrameView，实测渲染位置正确）的子视图，叠在
+     视频底部内侧（窗口边界内 ⇒ 触摸必然可达），半透明胶囊底衬。
+  ③ **拖动卡顿**：删除 30fps CADisplayLink 心跳（每帧强制 layout + 窗口移动即卡顿源）。
+     按钮随壳走原生视图树，拖动跟随零成本；host 重解析移到 layoutSubviews。
+  另：设置面板两个滑块写明作用 + min/max 端点数值 + 标题带当前值；新增 `PGCMD-META`
+  方法表 dump（class_copyMethodList 不含类方法，`+commandForXxx:` 工厂在元类上）；
+  真机日志实锤系统快退/快进 = `playbackAction=1 + dict[6]=±10`，v0.7 接 seek。
 
 ## 设置
 

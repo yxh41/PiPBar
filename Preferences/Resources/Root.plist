@@ -68,13 +68,19 @@
 			<key>key</key>
 			<string>FrameWidth</string>
 			<key>label</key>
-			<string>外框宽度（顶/左右）</string>
+			<string>外框宽度（顶/左右边框粗细）</string>
 			<key>min</key>
 			<real>4</real>
 			<key>max</key>
 			<real>24</real>
+			<key>minValueText</key>
+			<string>4</string>
+			<key>maxValueText</key>
+			<string>24</string>
 			<key>default</key>
 			<real>8</real>
+			<key>footnote</key>
+			<string>单位 pt：视频顶部与左右三边黑边的厚度。数值越大壳越厚。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -84,13 +90,19 @@
 			<key>key</key>
 			<string>BarHeight</string>
 			<key>label</key>
-			<string>底部高度</string>
+			<string>底部高度（视频下方黑边条）</string>
 			<key>min</key>
 			<real>28</real>
 			<key>max</key>
 			<real>80</real>
+			<key>minValueText</key>
+			<string>28</string>
+			<key>maxValueText</key>
+			<string>80</string>
 			<key>default</key>
 			<real>40</real>
+			<key>footnote</key>
+			<string>单位 pt：视频底部黑边的厚度。控制按钮（上一曲/播放/下一曲）另叠加在视频底部内侧。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
