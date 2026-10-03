@@ -515,7 +515,7 @@ static UIImage *pipIcon(BOOL playing) {
     NSUInteger i = 0;
     for (UIView *v in self.subviews) {
         if (![v isKindOfClass:[UIButton class]]) continue;
-        CGFloat cx = CGRectGetMinX(btnRow) + CGRectGetWidth(btnRow) * xs[i];
+        CGFloat cx = CGRectGetMinX(barRect) + CGRectGetWidth(barRect) * xs[i];
         v.frame = CGRectMake(cx - btnW / 2.0, by, btnW, btnH);   // 必须 frame，不是 center（v0.2 踩坑）
         v.hidden = !showBar;
         if (v.tag == 2) [(UIButton *)v setImage:pipIcon(gPlaying) forState:UIControlStateNormal];
