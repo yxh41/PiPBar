@@ -960,7 +960,7 @@ static void pipApplyFrameState(void) {
         PIPFrameView *f = gInstalledFrame;
         if (f == nil) return;
         [f setNeedsLayout];          // 壳的 hidden/几何/按钮全在 layoutSubviews 里按当前偏好算
-        PIPLog(@"reload applied: enabled=%d frame=%d buttons=%d w=%.0f barh=%.0f",
+        PIPLog(@"reload applied: enabled=%d frame=%d progress=%d w=%.0f barh=%.0f",
                gEnabled, gShowFrame, gShowBarProgress, (double)gFrameW, (double)gBarH);
     });
 }
@@ -1134,5 +1134,5 @@ static void pipInitPegasusOnce(void) {
         CFNotificationSuspensionBehaviorDeliverImmediately);
     PIPLog(@"loaded for SpringBoard | build=" PIP_BUILD_TAG
            " enabled=%d frame=%d progress=%d w=%.0f barh=%.0f filelog=%d",
-           gEnabled, gShowFrame, (double)gFrameW, (double)gBarH, gFileLog);
+           gEnabled, gShowFrame, gShowBarProgress, (double)gFrameW, (double)gBarH, gFileLog);
 }
