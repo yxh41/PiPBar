@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.26"
+#define PIP_BUILD_TAG @"v0.27"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -216,7 +216,9 @@ static void pipEnsureMediaRemote(void) {
 static void pipMRRefresh(void) {
     if (gMRGetNowPlayingInfo == NULL) return;
     double now = [[NSDate date] timeIntervalSinceReferenceDate];
-    if (now - gMRQueryAt < 2.0) return;   // 2 秒一次足够，拖动时也别刷爆 mediaserverd
+    // v0.27：2s → 1s。进度条「自己走」时以 App 上报为准，采样越密越贴合；
+    // 1s 一次对 mediaserverd 仍是极轻的负担。
+    if (now - gMRQueryAt < 1.0) return;
     gMRQueryAt = now;
 
     if (gMRGetAppPID != NULL) {
@@ -723,7 +725,16 @@ static void pipStopPiP(void) {
             }
         }
     }
-    PIPLog(@"close PiP：候选 selector 均未响应（iOS 版本漂移？）");
+    // v0.27：真机日志实锤上面 6 个 SpringBoard/内容 VC 的 selector **一个都不响应**
+    // （`close PiP：候选 selector 均未响应`）⇒ 点关闭按钮实际只做了「退出自由态」，
+    // 看起来就像「干成了别的事」。这里补一条确定可用的通道：
+    // MediaRemote 的 **kMRStop = 3** —— 停止播放后画中画自然关闭（与系统原生 ✕ 一致）。
+    if (gMRSendCommand != NULL) {
+        gMRSendCommand(3, nil);   // kMRStop
+        PIPLog(@"close PiP via MediaRemote kMRStop(3)（停止播放 ⇒ 关闭画中画）");
+        return;
+    }
+    PIPLog(@"close PiP：SpringBoard selector 与 MediaRemote 均不可用");
 }
 
 // 自由态拖动：把位移量累加到 PiP content view 的 transform 上。
@@ -856,7 +867,10 @@ static NSString *pipTimeText(double sec) {
         || gr.state == UIGestureRecognizerStateFailed) {
         if (self.seeking) {
             double target = gDragTargetSec;
-            double cur = gMRElapsed;   // 松手瞬间当前播放位置
+            // v0.27：cur 用「外推后的当前位置」而不是裸 gMRElapsed —— MR 每 2s 才回报一次，
+            // gMRElapsed 最多可能落后 2s；后退走的是**相对**的 skipByInterval，基准越旧
+            // 落点越偏（真机 `seek 校验` 差 +7.33s / +3.91s 就是这么来的）。
+            double cur = [self pipCurrentSeconds];   // 松手瞬间当前播放位置（外推修正）
             if (target < cur - 0.5) {
                 // v0.24：后退 seek —— 部分 App 不响应后退方向的 MRMediaRemoteSetElapsedTime，
                 // 改用 Pegasus 原生 skipByInterval（负间隔，与系统「快退」同机制）后退到目标位。
@@ -878,10 +892,10 @@ static NSString *pipTimeText(double sec) {
         }
         self.seeking = NO;
         // 进入宽限期：gSeekBusy 保持，心跳暂不覆盖进度（给 App 处理 seek 的时间，避免松手被旧进度拽回）
-        // v0.26：1.2s 太短 —— MR 每 2s 回报一次，宽限期一过就被「旧上报进度」拽回去，
-        // 于是「走一下、退一下」反复出现。延长到 3.5s（跨过约两个 MR 周期），
-        // 给 App 处理 seek 的时间，宽限期内进度稳定停在用户拖到的位置。
-        gSeekGraceUntil = [[NSDate date] timeIntervalSinceReferenceDate] + 3.5;
+        // v0.27：宽限期回到 **0.8s**。v0.26 拉到 3.5s 虽止住了来回跳，但代价是这 3.5s 内
+        // 进度按「目标位」外推、而 App 实际在别处 ⇒ 用户看到「进度条自己走时跟视频不同步」。
+        // 同步优先：只留 0.8s 让 App 处理 seek，之后立刻以 App 上报为准。
+        gSeekGraceUntil = [[NSDate date] timeIntervalSinceReferenceDate] + 0.8;
         gSeekTargetSec = gDragTargetSec;   // 用全局量（target 是上面 if 块的局部变量，此处已出作用域）
         [self pipRefreshProgress];
         return;
@@ -905,8 +919,8 @@ static NSString *pipTimeText(double sec) {
     CGFloat vrW = CGRectGetWidth(vr), vrH = CGRectGetHeight(vr);
     if (vrW < 8.0 || vrH < 8.0) return;
 
-    CGFloat bs = 40.0;
-    CGRect f = CGRectMake(CGRectGetMaxX(vr) - bs - 8.0, CGRectGetMinY(vr) + 8.0, bs, bs);
+    CGFloat bs = 28.0;   // v0.27：用户反馈 40pt 偏大，缩到 28pt
+    CGRect f = CGRectMake(CGRectGetMaxX(vr) - bs - 6.0, CGRectGetMinY(vr) + 6.0, bs, bs);
     self.closeFrame = f;
 
     BOOL show = gFreeMove;
@@ -918,7 +932,7 @@ static NSString *pipTimeText(double sec) {
         [UIBezierPath bezierPathWithRoundedRect:f cornerRadius:bs / 2.0].CGPath;
     // ✕：两条过圆心的短线（纯图层、无字体依赖，任何画面上都看得见）
     CGPoint c = CGPointMake(CGRectGetMidX(f), CGRectGetMidY(f));
-    CGFloat r = 8.0;
+    CGFloat r = 5.5;   // v0.27：随按钮缩小（28pt）
     UIBezierPath *xp = [UIBezierPath bezierPath];
     [xp moveToPoint:CGPointMake(c.x - r, c.y - r)];
     [xp addLineToPoint:CGPointMake(c.x + r, c.y + r)];
@@ -1368,6 +1382,13 @@ static void pipInitPegasusOnce(void);
             gSniffed = YES;
             pipDumpMethods(content.class, @"PIP-CONTENT");
             pipDumpMethods(objc_getClass("PGCommand"), @"PGCMD");
+            // v0.27：为「关闭画中画」找真正的 SpringBoard API —— 现有 6 个候选 selector
+            // 全部不响应，只能先把 SBPIPController 的方法表 dump 出来，下轮按真名接入。
+            Class pipCtl = objc_getClass("SBPIPController");
+            if (pipCtl != nil) {
+                pipDumpMethods(pipCtl, @"SBPIPCTL");
+                pipDumpMethods(objc_getMetaClass("SBPIPController"), @"SBPIPCTL-META");
+            }
             // class_copyMethodList 只列实例方法；+commandForXxx: 是类方法，得 dump 元类
             pipDumpMethods(objc_getMetaClass("PGCommand"), @"PGCMD-META");
         }
