@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.23"
+#define PIP_BUILD_TAG @"v0.24"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -134,6 +134,7 @@ static BOOL gPlaying = YES;   // 最近一次已知的播放状态
 // content VC 弱引用：loadView 时几何还全是 0（host 会回退成全屏 content.view），
 // 每次布局时重解析真正的视频宿主。切歌校验的回退分支也要用它，故声明在此处。
 static __weak UIViewController *gContentVC = nil;
+static __weak id gPegasusVC = nil;     // PGPictureInPictureViewController 实例（loadView 捕获），用于发 Pegasus 命令（skipByInterval 等）
 
 #pragma mark - MediaRemote 切歌通道（kMRNextTrack / kMRPreviousTrack）
 
@@ -168,6 +169,7 @@ static double gMRUpdatedAt = 0;      // 上次更新的墙上时间（用于线�
 static double gMRRate = 0;           // playbackRate（1=播放中 0=暂停）
 static BOOL gSeekBusy = NO;          // 拖动/seek 进行中：暂停外推，别跟用户抢进度
 static double gDragTargetSec = 0;    // 拖动中的目标秒数
+static double gSeekGraceUntil = 0;   // 松手宽限期（墙上时间）：期内 gSeekBusy 保持，心跳不覆盖进度
 
 // v0.12：切歌「试探 → 校验 → 回退」状态机
 
@@ -620,6 +622,7 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
     gFreePan.enabled = gFreeMove;
     gFreePinch.enabled = gFreeMove;
     self.closeButton.hidden = !gFreeMove;   // v0.23：仅自由态显示关闭按钮
+    [self pipLayoutCloseButton];            // 立即定位，避免依赖 layoutSubviews 时机导致不出现
     // 自由态需要能接到拖动 ⇒ hitTest 必须放行视频区
     self.userInteractionEnabled = YES;
     [self setNeedsLayout];
@@ -727,6 +730,13 @@ static NSString *pipTimeText(double sec) {
 
 // 只更新进度条三件套（不触发布局，放在心跳里每帧跑也便宜）
 - (void)pipRefreshProgress {
+    // 松手宽限：gSeekBusy 在宽限期内保持 YES，心跳不会用「旧上报进度」覆盖用户刚拖到的位置
+    // （避免「松手瞬间被旧进度拽回」——尤其在 App 对后退 seek 响应慢/不响应时最明显）。
+    if (gSeekBusy && [[NSDate date] timeIntervalSinceReferenceDate] > gSeekGraceUntil) {
+        gSeekBusy = NO;
+    }
+    // v0.23：关闭按钮位置每帧跟随视频矩形（不依赖 layoutSubviews 时机，确保解除吸附立即出现）
+    if (!self.closeButton.hidden) [self pipLayoutCloseButton];
     BOOL haveDur = (gMRDuration > 1.0);
     // ⚠️ v0.15 真机修复：首帧 layoutSubviews 时 gMRDuration 还是 0 ⇒ trackRect 被置零；
     // 之后 MediaRemote 探到时长（dur=23.3）也不再触发布局 ⇒ 进度条永远不显示。
@@ -795,19 +805,30 @@ static NSString *pipTimeText(double sec) {
         || gr.state == UIGestureRecognizerStateCancelled
         || gr.state == UIGestureRecognizerStateFailed) {
         if (self.seeking) {
-            // 松手才 seek：MRMediaRemoteSetElapsedTime 频繁调用会卡顿
-            if (gMRSetElapsedTime != NULL) {
-                gMRSetElapsedTime(gDragTargetSec);
-                PIPLog(@"seek -> elapsed=%.2fs / %.2fs（%.0f%%）",
-                       gDragTargetSec, gMRDuration, gMRDuration > 0 ? gDragTargetSec / gMRDuration * 100.0 : 0);
+            double target = gDragTargetSec;
+            double cur = gMRElapsed;   // 松手瞬间当前播放位置
+            if (target < cur - 0.5) {
+                // v0.24：后退 seek —— 部分 App 不响应后退方向的 MRMediaRemoteSetElapsedTime，
+                // 改用 Pegasus 原生 skipByInterval（负间隔，与系统「快退」同机制）后退到目标位。
+                [self pipSeekBackByInterval:(target - cur)];
+                PIPLog(@"seek(back) -> target=%.2fs / %.2fs（%.0f%%）",
+                       target, gMRDuration, gMRDuration > 0 ? target / gMRDuration * 100.0 : 0);
             } else {
-                PIPLog(@"MRMediaRemoteSetElapsedTime 不可用，无法 seek");
+                // 前进 / 不动：官方 SetElapsedTime（已验证可用）
+                if (gMRSetElapsedTime != NULL) {
+                    gMRSetElapsedTime(target);
+                    PIPLog(@"seek -> elapsed=%.2fs / %.2fs（%.0f%%）",
+                           target, gMRDuration, gMRDuration > 0 ? target / gMRDuration * 100.0 : 0);
+                } else {
+                    PIPLog(@"MRMediaRemoteSetElapsedTime 不可用，无法 seek");
+                }
             }
-            gMRElapsed = gDragTargetSec;   // 立即本地校准，避免拉回旧位置
+            gMRElapsed = target;   // 立即本地校准，避免拉回旧位置
             gMRUpdatedAt = [[NSDate date] timeIntervalSinceReferenceDate];
         }
         self.seeking = NO;
-        gSeekBusy = NO;
+        // 进入宽限期：gSeekBusy 保持，心跳暂不覆盖进度（给 App 处理 seek 的时间，避免松手被旧进度拽回）
+        gSeekGraceUntil = [[NSDate date] timeIntervalSinceReferenceDate] + 1.2;
         [self pipRefreshProgress];
         return;
     }
@@ -818,6 +839,43 @@ static NSString *pipTimeText(double sec) {
     if (r > 1) r = 1;
     gDragTargetSec = r * gMRDuration;
     [self pipRefreshProgress];
+}
+
+// v0.23：关闭按钮布局（集中一处，layoutSubviews / pipRefreshProgress / pipToggleFree 都会调）
+// 用 gVideoHost 把视频矩形换算到本画布坐标，钉在右上角 8pt 内；自由态 hitTest 会先命中它。
+- (void)pipLayoutCloseButton {
+    if (self.closeButton == nil || self.closeButton.hidden) return;
+    UIView *host = gVideoHost;
+    if (host == nil || host.window == nil) return;
+    CGRect vr = [host convertRect:host.bounds toView:self];
+    CGFloat vrW = CGRectGetWidth(vr), vrH = CGRectGetHeight(vr);
+    if (vrW < 8.0 || vrH < 8.0) return;
+    CGFloat bs = 36.0;
+    self.closeButton.frame = CGRectMake(CGRectGetMaxX(vr) - bs - 8.0,
+                                        CGRectGetMinY(vr) + 8.0, bs, bs);
+    [self bringSubviewToFront:self.closeButton];
+}
+
+// v0.24：后退 seek 兜底 —— Pegasus 原生 skipByInterval（action=1，负间隔=后退）。
+// 部分 App 对后退方向的 MRMediaRemoteSetElapsedTime 无响应，但系统「快退」按钮走的是
+// 同一套 skipByInterval，故用它把进度退到目标位。运行时全部判空，缺任何环节即静默跳过。
+- (void)pipSeekBackByInterval:(double)delta {
+    if (delta >= 0) return;            // 仅处理后退（负间隔）
+    Class pg = objc_getClass("PGCommand");
+    if (pg == nil) { PIPLog(@"skipByInterval 兜底失败：PGCommand 类不存在"); return; }
+    SEL factory = NSSelectorFromString(@"commandForPlaybackAction:associatedDoubleValue:");
+    if (![pg respondsToSelector:factory]) { PIPLog(@"skipByInterval 兜底失败：factory 未响应"); return; }
+    id vc = gPegasusVC;
+    if (vc == nil || ![vc respondsToSelector:@selector(handleCommand:)]) {
+        PIPLog(@"skipByInterval 兜底失败：PGPictureInPictureViewController 实例不可用"); return;
+    }
+    // commandForPlaybackAction:1(long long) associatedDoubleValue:delta(double)
+    id (*mk)(id, SEL, long long, double) = (id (*)(id, SEL, long long, double))objc_msgSend;
+    id cmd = mk(pg, factory, 1LL, (double)delta);
+    if (cmd == nil) { PIPLog(@"skipByInterval 兜底失败：构造命令返回 nil"); return; }
+    void (*hc)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
+    hc(vc, @selector(handleCommand:), cmd);
+    PIPLog(@"skipByInterval 兜底：后退 %.2fs（action=1）", delta);
 }
 
 // 全部按【当前视频矩形 + 当前偏好】重算 —— 偏好热更新也走这里（setNeedsLayout）
@@ -843,13 +901,8 @@ static NSString *pipTimeText(double sec) {
     CGFloat vrW = CGRectGetWidth(vr), vrH = CGRectGetHeight(vr);
     if (vrW < 8.0 || vrH < 8.0) return;
 
-    // v0.23：自由态关闭按钮 — 钉在视频右上角（外框内）。vr 已算好，布局跟随。
-    if (self.closeButton != nil && !self.closeButton.hidden) {
-        CGFloat bs = 36.0;
-        self.closeButton.frame = CGRectMake(CGRectGetMaxX(vr) - bs - 8.0,
-                                            CGRectGetMinY(vr) + 8.0, bs, bs);
-        [self bringSubviewToFront:self.closeButton];
-    }
+    // v0.23：自由态关闭按钮 — 钉在视频右上角（外框内）。位置统一定在 pipLayoutCloseButton
+    [self pipLayoutCloseButton];
 
     // v0.8：全屏判定收紧 —— 旧「>60% 屏宽」会把放大档 PiP（约 2/3~9/10 屏宽，
     // 用户截图实锤）误判成全屏而整壳隐藏。只有宽、高同时 ≈ 屏幕才算全屏播放。
@@ -1178,6 +1231,7 @@ static void pipInitPegasusOnce(void);
         if (videoHost == nil) return;
         gVideoHost = videoHost;   // 壳的矩形参照物（弱引用，几何就绪前会在 tick 里重解析）
         gContentVC = content;     // 供 tick 每帧重解析真正的视频宿主
+        gPegasusVC = self;        // self 即 PGPictureInPictureViewController，发 Pegasus 命令用
         pipInitPegasusOnce();   // content 已实例化 ⇒ Pegasus 必然已加载，此时挂它的钩子最稳
         pipDumpHierarchy(content.view, @"CONTENT-TREE");
 
