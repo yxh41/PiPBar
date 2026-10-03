@@ -262,15 +262,9 @@ static void pipMRRefresh(void) {
     });
 }
 
-// 能否试切歌 —— v0.13 真机实测后收紧判据（这条结论有数据支撑，不再是推测）：
-// MediaRemote 探测日志证明：短视频类 App（抖音，pid=28085）**完整注册了 NowPlaying**
-// （标题/作者/封面/时长/ContentItemIdentifier 全有），但 music=0、TotalTrackCount 不存在，
-// 连发 kMRNextTrack 十几次、1.5s 内 title 恒定不变 ⇒ **App 根本没实现 nextTrack handler**。
-// 结论：切歌能力只存在于「音乐 App / 有播放列表」的场景。
-// 对短视频类 App 直接走 ±10s 快退快进，不再浪费 1.5s 试探（用户体感更跟手）。
-static BOOL pipMRCanTrackSkip(void) {
-    return gMRIsMusicApp || gMRHasPlaylist;
-}
+// v0.16 注：原先的 pipMRCanTrackSkip / pipSendTrackSkip / pipVerifyTrackSkip
+// （切歌试探与回退状态机）已随「移除三颗按钮」一并删除 —— 实测短视频类 App 不实现
+// nextTrack handler，切歌能力不具备，保留即为死代码。
 
 #pragma mark - 外框 + 按钮条
 
