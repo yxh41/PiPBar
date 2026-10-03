@@ -78,6 +78,12 @@
   ④ 外框太粗：FrameWidth 默认 12→8；另加 PiP 展开 >60% 屏宽自动收起壳。
   CI 编译修复：`CGRectZero` 非编译期常量 → `(CGRect){{0,0},{0,0}}`；`PIPFrameView` 文件级静态指针
   加 `@class` 前置声明（C 前两段均 -Werror 失败）。
+- v0.5.1：修「外框消失」—— `loadView` 钩触发时整棵 PiP 视图几何还都是 `{0,0}`（content.view 且
+  `[hidden]`），`pipPickHostView` 找不到有尺寸的宿主、回退成**全屏** `content.view`，壳被 >60% 屏宽
+  误判成「展开」而 `self.hidden=YES`。改法：① 显示链心跳（CADisplayLink）每帧用已就绪几何重解析
+  真正的视频宿主 `PGLayerHostView`（`gContentVC` 弱引用持有 content VC）；② 「是否展开」改按
+  **视频宽度**判（`vrW > 屏宽*0.6`），不再用画布（content.view）宽度。日志 `build=` 由 v0.2 更正为 v0.5。
+  （设置里两个滑块 = **外框宽度** / **底部高度**，见上方表格）
 
 ## 设置
 

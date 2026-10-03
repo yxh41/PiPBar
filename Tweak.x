@@ -31,7 +31,7 @@
 #import <objc/message.h>
 #import <CoreFoundation/CoreFoundation.h>
 
-#define PIP_BUILD_TAG @"v0.2"
+#define PIP_BUILD_TAG @"v0.5"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -123,9 +123,13 @@ static BOOL gPlaying = YES;   // 最近一次已知的播放状态
 #pragma mark - 外框 + 按钮条
 
 @class PIPFrameView;   // 前置声明：下面的文件级静态指针在 @interface 之前，需先告诉编译器类型
+static UIView *pipPickHostView(UIViewController *content);   // 前向声明（tick 里要复用）
 
 // 视频宿主（弱引用）：壳要「包在视频外面」，必须随时知道视频矩形在哪。
 static __weak UIView *gVideoHost = nil;
+// content VC 弱引用：loadView 时几何还是 0（host 会回退成全屏 content.view），
+// 由显示链心跳每帧重解析真正的视频宿主（PGLayerHostView）。
+static __weak UIViewController *gContentVC = nil;
 
 // —— 按钮的触摸问题（v0.4 真机实锤）——
 // PiP 窗口边界 = 视频矩形，底条在窗口【外面】。窗口外的触摸根本不会派发给这个窗口，
@@ -266,13 +270,22 @@ static void pipSyncTouchWindow(void) {
 
 @implementation PIPSyncSink
 - (void)tick:(CADisplayLink *)link {
+    // loadView 钩里所有视图 geometry 还都是 0，pipPickHostView 会回退成全屏 content.view，
+    // 壳和按钮就贴到整块全屏上了（且会被 >60% 屏宽误判成「展开」而隐藏）。
+    // 这里每帧用已就绪的几何重新解析真正的视频宿主（PGLayerHostView），贴回视频矩形。
+    if (gContentVC != nil && (gVideoHost == nil || CGRectGetWidth(gVideoHost.bounds) < 1.0)) {
+        UIView *h = pipPickHostView(gContentVC);
+        if (h != nil) gVideoHost = h;
+    }
     UIView *host = gVideoHost;
     if (host == nil || host.window == nil || host.window.hidden) {
         [link invalidate];
         if (gTouchWindow != nil) gTouchWindow.hidden = YES;
+        if (gInstalledFrame != nil) gInstalledFrame.hidden = YES;
         gSyncLink = nil;   // 下次 PiP 起来时 pipEnsureSyncLink 会重建
         return;
     }
+    [gInstalledFrame setNeedsLayout];   // 用最新 host 重算视频矩形并重画壳
     pipSyncTouchWindow();
 }
 @end
@@ -349,9 +362,9 @@ static void pipEnsureSyncLink(void) {
     CGFloat vrW = CGRectGetWidth(vr), vrH = CGRectGetHeight(vr);
     if (vrW < 8.0 || vrH < 8.0) return;
 
-    // PiP 展开成大窗（>60% 屏宽）时不画壳也不放按钮
-    gExpandedUI = CGRectGetWidth(self.bounds) >
-                  [UIScreen mainScreen].bounds.size.width * 0.6;
+    // PiP 展开成大窗（>60% 屏宽）时不画壳也不放按钮 —— 必须按【视频】宽度判，
+    // 不能用 self.bounds（壳挂在 content.view 上，content.view 常是全屏大小，会误判成展开）
+    gExpandedUI = vrW > [UIScreen mainScreen].bounds.size.width * 0.6;
     self.hidden = !gEnabled || (!gShowFrame && !gShowButtons) || gExpandedUI;
 
     CGRect outer = CGRectMake(CGRectGetMinX(vr) - sw, CGRectGetMinY(vr) - sw,
@@ -561,7 +574,8 @@ static void pipInitPegasusOnce(void);
 
         UIView *videoHost = pipPickHostView(content);
         if (videoHost == nil) return;
-        gVideoHost = videoHost;   // 壳的矩形参照物（弱引用）
+        gVideoHost = videoHost;   // 壳的矩形参照物（弱引用，几何就绪前会在 tick 里重解析）
+        gContentVC = content;     // 供 tick 每帧重解析真正的视频宿主
         pipInitPegasusOnce();   // content 已实例化 ⇒ Pegasus 必然已加载，此时挂它的钩子最稳
         pipDumpHierarchy(content.view, @"CONTENT-TREE");
 
