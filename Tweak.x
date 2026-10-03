@@ -125,6 +125,10 @@ static void pipFileWrite(NSString *line) {
 
 static BOOL gPlaying = YES;   // 最近一次已知的播放状态
 
+// content VC 弱引用：loadView 时几何还全是 0（host 会回退成全屏 content.view），
+// 每次布局时重解析真正的视频宿主。切歌校验的回退分支也要用它，故声明在此处。
+static __weak UIViewController *gContentVC = nil;
+
 #pragma mark - MediaRemote 切歌通道（kMRNextTrack / kMRPreviousTrack）
 
 // 为什么需要它：系统画中画（Pegasus）只提供 skipByInterval / skipToLive / skipPreroll，
@@ -280,9 +284,6 @@ static UIView *pipPickHostView(UIViewController *content);   // 前向声明（l
 
 // 视频宿主（弱引用）：壳要「包在视频外面」，必须随时知道视频矩形在哪。
 static __weak UIView *gVideoHost = nil;
-// content VC 弱引用：loadView 时几何还全是 0（host 会回退成全屏 content.view），
-// 每次布局时重解析真正的视频宿主。
-static __weak UIViewController *gContentVC = nil;
 
 static BOOL gExpandedUI = NO;              // PiP 展开成大窗时把壳和按钮都收起来
 static PIPFrameView *gInstalledFrame = nil;   // 当前壳（reload 与 play/pause 图标刷新都要用，前置声明）
