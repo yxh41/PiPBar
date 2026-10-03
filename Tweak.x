@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.27"
+#define PIP_BUILD_TAG @"v0.28"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -130,6 +130,7 @@ static void pipFileWrite(NSString *line) {
 @end
 
 static BOOL gPlaying = YES;   // 最近一次已知的播放状态
+static BOOL gPegasusLogged = NO;   // v0.28：进度改走 Pegasus 播放状态后只打一次确认日志
 
 // content VC 弱引用：loadView 时几何还全是 0（host 会回退成全屏 content.view），
 // 每次布局时重解析真正的视频宿主。切歌校验的回退分支也要用它，故声明在此处。
@@ -695,10 +696,33 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
     [self pipCloseAction:nil];
 }
 
+// v0.28：发一条 Pegasus 命令（PGCommand 的类方法工厂 + 交给 PiP VC 的 handleCommand:）。
+// 真机 PGCMD-META dump 里有 **commandForCancelPIP** —— 这正是 Pegasus 自己的「关闭画中画」，
+// 比 v0.27 用 MediaRemote kMRStop（停播放）更贴合语义。全程判空，缺任一环节返回 NO。
+static BOOL pipSendPegasusCommand(NSString *name) {
+    Class pg = objc_getClass("PGCommand");
+    if (pg == nil) return NO;
+    SEL s = NSSelectorFromString(name);
+    if (![pg respondsToSelector:s]) return NO;
+    id vc = gPegasusVC;
+    if (vc == nil || ![vc respondsToSelector:@selector(handleCommand:)]) return NO;
+    id (*mk)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    id cmd = mk(pg, s);
+    if (cmd == nil) return NO;
+    void (*hc)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
+    hc(vc, @selector(handleCommand:), cmd);
+    return YES;
+}
+
 // v0.23：关闭 PiP —— 多候选 selector 降级，覆盖 iOS 版本差异。
 // SBPIPController（SpringBoard 私有的 PiP 服务）与 contentVC 上逐个尝试，
 // 第一个 respondsToSelector 的就调用；都不认则只打日志，不崩。
 static void pipStopPiP(void) {
+    // v0.28：优先走 Pegasus 原生关闭（真机 dump 实锤存在）
+    if (pipSendPegasusCommand(@"commandForCancelPIP")) {
+        PIPLog(@"close PiP via Pegasus commandForCancelPIP");
+        return;
+    }
     NSArray *sels = @[@"invalidatePictureInPicture",
                      @"stopPictureInPicture",
                      @"_stopPictureInPicture",
@@ -860,6 +884,9 @@ static NSString *pipTimeText(double sec) {
     if (gr.state == UIGestureRecognizerStateBegan) {
         self.seeking = YES;
         gSeekBusy = YES;
+        // v0.28：拖动期间彻底关掉自由拖动 —— 只靠 shouldBegin 的热区判定的话，
+        // 手指一旦飘出热区，窗口就可能跟着动（用户持续反馈「拖进度条窗口跟着跑」）。
+        if (gFreePan != nil) gFreePan.enabled = NO;
         [self pipRefreshProgress];       // 先显示拇指/时间标签
     }
     if (gr.state == UIGestureRecognizerStateEnded
@@ -897,6 +924,7 @@ static NSString *pipTimeText(double sec) {
         // 同步优先：只留 0.8s 让 App 处理 seek，之后立刻以 App 上报为准。
         gSeekGraceUntil = [[NSDate date] timeIntervalSinceReferenceDate] + 0.8;
         gSeekTargetSec = gDragTargetSec;   // 用全局量（target 是上面 if 块的局部变量，此处已出作用域）
+        if (gFreePan != nil) gFreePan.enabled = gFreeMove;   // v0.28：拖动结束恢复自由态拖动
         [self pipRefreshProgress];
         return;
     }
@@ -1434,6 +1462,45 @@ static void pipInitPegasusOnce(void);
                     // 仅保留状态本身（供未来可能的 UI 使用）
                 }
                 PIPLog(@"STATE diff=%@", d);
+            }
+            // ★ v0.28：进度条改以 **Pegasus 自己的播放状态** 为准。
+            // 真机证据：MediaRemote 的 ElapsedTime 对短视频 App 更新极稀疏 ——
+            // 日志 01:33:45 ela=1.5 → 01:33:50 ela=1.8（rate=1.00，5 秒只走了 0.3s）。
+            // 拿这种陈旧值做「+ 线性外推」，进度条必然越跑越领先真实画面 ⇒ 用户看到
+            // 「进度条自己走时跟视频不同步」。Pegasus 是画中画本体，它的时间才是准的。
+            // 用 -1 作「未找到」哨兵，避免依赖 math.h 的 isnan/fabs
+            double pDur = -1.0, pEla = -1.0, pRate = -1.0;
+            for (id k in d) {
+                id v = d[k];
+                if (![v respondsToSelector:@selector(doubleValue)]) continue;
+                NSString *lk = [[k description] lowercaseString];
+                if ([lk isEqualToString:@"playbackrate"]) {
+                    pRate = [v doubleValue];
+                } else if ([lk isEqualToString:@"duration"]
+                           || [lk isEqualToString:@"itemduration"]) {
+                    pDur = [v doubleValue];
+                } else if ([lk isEqualToString:@"elapsedtime"]
+                           || [lk isEqualToString:@"currenttime"]
+                           || [lk isEqualToString:@"elapsed"]) {
+                    pEla = [v doubleValue];
+                }
+            }
+            if (!gSeekBusy) {   // 用户在拖进度条时不覆盖，避免回跳
+                BOOL got = NO;
+                if (pDur > 0.5) { gMRDuration = pDur; got = YES; }
+                if (pEla >= 0.0) {
+                    // 短视频会循环，elapsed 允许回退 —— 直接采用，不再外推领先真实画面
+                    gMRElapsed = pEla;
+                    gMRUpdatedAt = [[NSDate date] timeIntervalSinceReferenceDate];
+                    got = YES;
+                }
+                if (pRate >= 0.0) gMRRate = pRate;
+                if (got && !gPegasusLogged) {
+                    gPegasusLogged = YES;
+                    PIPLog(@"进度改用 Pegasus 播放状态（dur=%.2f ela=%.2f rate=%.2f）keys={%@}",
+                           gMRDuration, gMRElapsed, gMRRate,
+                           [d.allKeys componentsJoinedByString:@","]);
+                }
             }
         }
     } @catch (NSException *e) {
