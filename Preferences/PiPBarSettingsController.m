@@ -36,9 +36,15 @@ static const void *kPiPSliderPrefKey  = &kPiPSliderPrefKey;    // 属于哪个�
 static const void *kPiPSliderCellKey  = &kPiPSliderCellKey;    // 记住所属 cell（弱）
 
 // 设置面板自己的文件日志（独立文件，方便与 tweak 日志一起回传）
+// v0.14：加 256KB 上限自动清空重记 —— 上一版因判重失效被刷到 3.4MB。
 static void pipPrefsLogImpl(NSString *line) {
     @try {
         NSString *path = @"/var/mobile/Library/Logs/PiPBarPrefs.log";
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSDictionary *attr = [fm attributesOfItemAtPath:path error:nil];
+        if (attr != nil && [attr fileSize] > 256 * 1024) {
+            [fm removeItemAtPath:path error:nil];
+        }
         NSDateFormatter *df = [[NSDateFormatter alloc] init];
         df.dateFormat = @"HH:mm:ss";
         NSString *out = [NSString stringWithFormat:@"%@ %@\n", [df stringFromDate:[NSDate date]], line];
@@ -156,6 +162,7 @@ static void pipPrefsLogImpl(NSString *line) {
 
     NSMutableArray *cells = [NSMutableArray array];
     [self pipCollectCells:tv into:cells];
+    __weak PiPBarSettingsController *weakSelf = self;
     int bound = 0;
     for (UITableViewCell *cell in cells) {
         UISlider *sl = [self pipFindSliderIn:cell];
@@ -177,18 +184,19 @@ static void pipPrefsLogImpl(NSString *line) {
         pipPrefsLog(@"bind: %@ 滑块已挂 target（min=%.0f max=%.0f value=%.0f）",
                     key, (double)sl.minimumValue, (double)sl.maximumValue, (double)sl.value);
     }
-    pipPrefsLog(@"bind: 扫描到 cell=%d，本轮新绑定=%d", (int)cells.count, bound);
-
-    // cell 可能在绑定之后才真正创建（reload/滚动）⇒ 延迟重试几次，避免漏绑
+    // v0.14：本轮一个都没绑到时**不写日志** —— viewDidLayoutSubviews 会被高频调用，
+    // 上一版每次都写 ⇒ PiPBarPrefs.log 刷到 3.4MB。
     if (bound == 0) {
-        __weak PiPBarSettingsController *weakSelf = self;
+        // cell 可能在绑定之后才真正创建（reload/滚动）⇒ 延迟重试几次，避免漏绑
         for (int i = 1; i <= 3; i++) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * i * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 [weakSelf pipBindSliders];
             });
         }
+        return;
     }
+    pipPrefsLog(@"bind: 扫描到 cell=%d，本轮新绑定=%d", (int)cells.count, bound);
 }
 
 // 数值显示：直接改【滑块所在 cell 自己的】标题文字 —— 与滑块同一行、跟手即时

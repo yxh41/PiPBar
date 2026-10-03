@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.13"
+#define PIP_BUILD_TAG @"v0.14"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -225,7 +225,9 @@ static void pipMRRefresh(void) {
             gMRProhibitsSkip = prohibit; gMRTitle = ti; gMRUniqueID = ui;
             // v0.12：首次拿到（或变化时）打印原始键集 + pid —— 用来判定
             // 「MediaRemote 到底看不看得见这个 App」这个根本问题
-            if (![kt isEqualToString:(gMRLastKeys ?: @"")]) {
+            // ⚠️ 判重必须用 isEqualToString:（两侧都给非 nil），否则 keys 为 nil 时
+            // [nil isEqualToString:] 返回 NO ⇒ 判重永远失效 ⇒ 每 2 秒刷屏（曾刷出 3.4MB 日志）
+            if (![kt ?: @"" isEqualToString:(gMRLastKeys ?: @"")]) {
                 gMRLastKeys = kt;
                 PIPLog(@"MR info: pid=%d music=%d list=%d prohibit=%d title=%@ uid=%@ keys={%@}",
                        gMRAppPID, music, hasList, prohibit, ti ?: @"-", ui ?: @"-", kt ?: @"(空)");
