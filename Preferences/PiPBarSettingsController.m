@@ -240,36 +240,43 @@ static void pipPrefsLogImpl(NSString *line) {
         val.textColor = [UIColor labelColor];
         val.textAlignment = NSTextAlignmentRight;
         val.userInteractionEnabled = NO;    // 不吃触摸，绝不挡滑条
-        [cell.contentView addSubview:val];
+        // v0.20：插到**最底层** —— PSSliderCell 的滑条是 contentView 的既有子视图，
+        // 我们后加的标签默认盖在最上层；虽然 userInteractionEnabled=NO 已让它不吃触摸，
+        // 但插到底层更稳妥，彻底杜绝「滑块滑不动」的可能。
+        [cell.contentView insertSubview:val atIndex:0];
         objc_setAssociatedObject(cell, kPiPValueLabelKey, val, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     return val;
 }
 
-// v0.19 布局：标题与数值同处**顶部一行**（数值右对齐），滑条被压到**下方**独占整行。
-// PSSliderCell 默认把 label 和 slider 叠在同一行右侧，故这里手工摆位。
+// v0.20 布局：**绝不改 UISlider 的 frame**。
+// v0.19 手工把滑条压到下方（`sl.frame = ...`），后果有两个（真机反馈）：
+//   ① 「下边的滑块滑不动」—— 改 frame 打断了 PSSliderCell 自身的布局/手势配合；
+//   ② 「文字位置还是有问题」—— 系统每次 layout 又把 label/slider 摆回默认，
+//      我们设的坐标被覆盖，于是又叠到一起。
+// 正确做法：滑条完全交给系统，只把**标题**缩到 11pt 放在左上、**数值**放右上，
+// 二者同处 cell 顶部那一条（PSSliderCell 顶部本就留白给 label），互不重叠。
 - (void)pipLayoutSliderRowInCell:(UITableViewCell *)cell {
     if (cell == nil) return;
-    UISlider *sl = [self pipFindSliderIn:cell];
-    if (sl == nil) return;
     CGFloat w = CGRectGetWidth(cell.contentView.bounds);
     if (w < 10.0) return;      // 布局未就绪，等下一次
     CGFloat pad = 14.0;
-    CGFloat topH = 15.0;
+    CGFloat topH = 13.0;
 
-    // 标题：左上
-    cell.textLabel.frame = CGRectMake(pad, 2.0, w * 0.55, topH);
+    // 标题：左上，小字灰
+    UILabel *title = cell.textLabel;
+    if (title != nil) {
+        title.font = [UIFont systemFontOfSize:11.0];
+        title.textColor = [UIColor secondaryLabelColor];
+        title.frame = CGRectMake(pad, 1.0, w * 0.62 - pad, topH);
+    }
     // 数值：右上（与标题同一行，绝不与滑条重叠）
     UILabel *val = objc_getAssociatedObject(cell, kPiPValueLabelKey);
     if (val != nil) {
         [val sizeToFit];
-        CGFloat vw = MAX(CGRectGetWidth(val.bounds) + 4.0, 28.0);
-        val.frame = CGRectMake(w - vw - pad, 2.0, vw, topH);
+        CGFloat vw = MAX(CGRectGetWidth(val.bounds) + 4.0, 26.0);
+        val.frame = CGRectMake(w - vw - pad, 1.0, vw, topH);
     }
-    // 滑条：下方独占整行
-    CGFloat sy = topH + 4.0;
-    CGFloat sh = CGRectGetHeight(sl.bounds) > 0 ? CGRectGetHeight(sl.bounds) : 30.0;
-    sl.frame = CGRectMake(pad, sy, w - pad * 2.0, sh);
 }
 
 - (void)pipSliderChanged:(UISlider *)sender {

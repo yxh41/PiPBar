@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.18"
+#define PIP_BUILD_TAG @"v0.19"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -773,9 +773,10 @@ static NSString *pipTimeText(double sec) {
     if (innerR < 2.0 || innerR > 40.0) innerR = 16.0;
     CGFloat outerR = innerR + sw;
 
-    // v0.18：sw==0（用户把「外框宽度」拉到 0 = 不显示边框）时彻底不画壳。
-    // 否则 even-odd 挖洞路径会退化 —— 外圈与内洞重合，边缘仍会留下一圈发丝描边。
-    BOOL wantCase = gShowFrame && !gExpandedUI && sw >= 0.5;
+    // sw==0（外框宽度拉到 0）时：顶/左右边框消失，但**底部黑边 + 进度条照常**。
+    // v0.18 误用 `sw >= 0.5` 一刀切把整圈壳都关掉 ⇒ 用户反馈「外边框又没了」。
+    // 正确做法：壳照常绘制（覆盖整个黑边区），只是向外扩的 sw=0 ⇒ 顶/左右无边框。
+    BOOL wantCase = gShowFrame && !gExpandedUI;
     self.caseLayer.hidden = !wantCase;
     self.edgeLayer.hidden = !wantCase;
     if (wantCase && outer.size.width > 8.0 && outer.size.height > 8.0) {
@@ -784,7 +785,8 @@ static NSString *pipTimeText(double sec) {
         [op appendPath:ip];   // even-odd：视频矩形挖空，画面原样透出
         self.caseLayer.path = op.CGPath;
         self.caseLayer.shadowPath = nil;   // v0.6：无投影（蒙灰根因已删）
-        self.edgeLayer.path = ip.CGPath;   // 发丝高光勾在洞口一圈
+        // sw==0 时不画内沿高光（否则 even-odd 外圈与内洞重合，边缘会留一圈发丝描边）
+        self.edgeLayer.path = (sw >= 0.5) ? ip.CGPath : nil;
     } else {
         self.caseLayer.path = nil;
         self.edgeLayer.path = nil;
