@@ -31,7 +31,7 @@
 #import <objc/message.h>
 #import <CoreFoundation/CoreFoundation.h>
 
-#define PIP_BUILD_TAG @"v0.5"
+#define PIP_BUILD_TAG @"v0.7"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -133,6 +133,10 @@ static __weak UIViewController *gContentVC = nil;
 
 static BOOL gExpandedUI = NO;              // PiP 展开成大窗时把壳和按钮都收起来
 static PIPFrameView *gInstalledFrame = nil;   // 当前壳（reload 与 play/pause 图标刷新都要用，前置声明）
+// 显示链心跳（无卡顿版）：只在「画布局部视频矩形」真变化时才 setNeedsLayout。
+// 拖动时窗口移动、但画布局部几何不变 ⇒ 不重画 ⇒ 不卡；只有 resize/expand 才重画。
+static CADisplayLink *gSyncLink = nil;
+static CGRect gLastVR = (CGRect){{0,0},{0,0}};
 
 // 造型对齐参考图（安卓 PiP 同款）：黑色圆角「手机壳」**套在视频外面**——
 //   视频矩形不动，壳画在容器层、向外扩：顶/左右 = gFrameW，底部 = gBarH。
@@ -320,6 +324,50 @@ static UIImage *pipIcon(BOOL playing) {
 }
 
 @end
+
+#pragma mark - 显示链心跳（无卡顿版）
+
+// v0.6 误删 CADisplayLink 心跳 → host 重解析只留在 layoutSubviews，
+// 而 PiP 视频层尺寸变化时**不触发父 view 重布局** → layoutSubviews 不被调用
+// → pipPickHostView 永不运行 → host 卡在零尺寸 → 外框永不重画
+// （日志 videoRect={{0,0},{0,0}} 实锤）。
+// v0.7 加回心跳，但只在「视频矩形真变化」时才 setNeedsLayout：
+//   拖动时窗口移动、画布局部几何不变 ⇒ 不重画 ⇒ 不卡；只有 resize/expand 才重画。
+@interface PIPSyncSink : NSObject
++ (void)tick:(CADisplayLink *)link;
+@end
+
+@implementation PIPSyncSink
++ (void)tick:(CADisplayLink *)link {
+    (void)link;
+    PIPFrameView *f = gInstalledFrame;
+    if (f == nil) { gLastVR = (CGRect){{0,0},{0,0}}; return; }
+    if (!gShowFrame && !gShowButtons) { gLastVR = (CGRect){{0,0},{0,0}}; return; }
+    // host 几何就绪前为 0 → 每帧重解析真正的视频宿主（PGLayerHostView）
+    UIView *host = gVideoHost;
+    if (gContentVC != nil && (host == nil || CGRectGetWidth(host.bounds) < 1.0)) {
+        UIView *h = pipPickHostView(gContentVC);
+        if (h != nil) { host = h; gVideoHost = h; }
+    }
+    if (host == nil || host.window == nil) return;
+    // 当前视频矩形（本画布坐标），与 layoutSubviews 算法完全一致
+    CGRect vr = [host convertRect:host.bounds toView:f];
+    // vr 真变化才重画：拖动时窗口移动但 host 相对 f 的几何不变 ⇒ 不重画 ⇒ 不卡
+    if (!CGRectEqualToRect(vr, gLastVR)) {
+        gLastVR = vr;
+        [f setNeedsLayout];   // 触发 layoutSubviews：按新几何重算外框/按钮
+    }
+}
+@end
+
+static void pipEnsureSyncLink(void) {
+    if (gSyncLink != nil) return;
+    // 以类对象为 target：类对象永不被释放，规避 CADisplayLink 对 target 的强引用循环
+    gSyncLink = [CADisplayLink displayLinkWithTarget:[PIPSyncSink class]
+                                            selector:@selector(tick:)];
+    [gSyncLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    PIPLog(@"sync link started (no-jank heartbeat)");
+}
 
 #pragma mark - 嗅探（日志驱动：v0.3 拿这份日志把上一曲/下一曲接通）
 
@@ -537,15 +585,27 @@ static void pipInitPegasusOnce(void);
                     PIPLog(@"PGCommand/commandForSetPlaying: 不可用（类没加载或选择子漂移）");
                 }
             } else {
-                // 上一曲(1) / 下一曲(3)：真机日志实锤系统「快退/快进」= action=1 + dict[6]=±10 秒，
-                // 等 PGCMD-META 方法表拿到 seek 命令的构造器后接通（v0.7）
-                PIPLog(@"button tag=%ld —— 待接 seek（见 PGCMD-META 方法表）", (long)tag);
+                // 上一曲(1) / 下一曲(3)：PGCMD-META 实锤构造器
+                // commandForPlaybackAction:associatedDoubleValue:，系统快退/快进 = action=1 + ±10 秒
+                Class cmdCls = objc_getClass("PGCommand");
+                SEL mk = sel_registerName("commandForPlaybackAction:associatedDoubleValue:");
+                if (cmdCls != nil && [cmdCls respondsToSelector:mk]) {
+                    double off = (tag == 1) ? -10.0 : 10.0;   // 上一曲=-10s，下一曲=+10s
+                    id (*build)(id, SEL, long long, double) =
+                        (id (*)(id, SEL, long long, double))objc_msgSend;
+                    id cmd = build(cmdCls, mk, 1LL, off);
+                    [(PGPictureInPictureViewController *)c handleCommand:cmd];
+                    PIPLog(@"seek -> action=1 offset=%.0f", off);
+                } else {
+                    PIPLog(@"PGCommand/commandForPlaybackAction:associatedDoubleValue: 不可用");
+                }
             }
         };
 
         [canvas addSubview:frame];
         [canvas bringSubviewToFront:frame];
         gInstalledFrame = frame;
+        pipEnsureSyncLink();   // v0.7：无卡顿心跳，保证 host 解析就绪后外框持续重画
         gInstalledHostDesc = [NSString stringWithFormat:@"%@ over %@ (video=%@)",
                               NSStringFromClass(frame.class), NSStringFromClass(canvas.class),
                               NSStringFromClass(videoHost.class)];

@@ -2,7 +2,7 @@ include $(THEOS)/makefiles/common.mk
 
 BUNDLE_NAME = PiPBarPrefs
 
-PiPBarPrefs_FILES = PiPBarSettingsController.m
+PiPBarPrefs_FILES = PiPBarSettingsController.m PiPBarSliderCell.m
 PiPBarPrefs_INSTALL_PATH = /Library/PreferenceBundles
 PiPBarPrefs_FRAMEWORKS = UIKit
 PiPBarPrefs_PRIVATE_FRAMEWORKS = Preferences

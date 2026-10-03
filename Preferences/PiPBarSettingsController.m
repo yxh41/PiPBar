@@ -11,6 +11,7 @@
 #import <Preferences/PSSpecifier.h>
 #import <objc/runtime.h>
 #import "PiPBarPrefsBridge.h"
+#import "PiPBarSliderCell.h"
 
 // ⚠️ roothide 的 PSListController.h 未公开声明 setPreferenceValue:forSpecifier:，
 // 但 PreferenceLoader 运行时确实实现该方法；补前向声明让 [super setPreferenceValue:...]
@@ -24,9 +25,9 @@
 - (void)setProperty:(id)property forKey:(NSString *)key;
 @end
 
-// PSListController 头未声明 readPreferenceValue:（读 specifier 当前值，滑块标题要用）
-@interface PSListController (PIPReadPref)
-- (id)readPreferenceValue:(PSSpecifier *)specifier;
+// PSSpecifier 头未声明 setCellClass:，自定义滑块单元格靠它注册（避免 -Werror 告警）
+@interface PSSpecifier (PIPCellClass)
+- (void)setCellClass:(Class)c;
 @end
 
 @implementation PiPBarSettingsController
@@ -34,6 +35,16 @@
 - (NSArray *)specifiers {
     if (!_specifiers) {
         _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
+        // v0.7：两个滑块改用自绘数值的 PiPBarSliderCell（roothide 私有 PSSliderCell
+        // 不渲染当前值，且 reload 会打断拖动手势）。右侧 UILabel 实时显示「X pt」。
+        for (PSSpecifier *spec in _specifiers) {
+            NSString *key = [spec propertyForKey:@"key"];
+            if ([key isEqualToString:@"FrameWidth"] || [key isEqualToString:@"BarHeight"]) {
+                if ([spec respondsToSelector:@selector(setCellClass:)]) {
+                    [spec setCellClass:[PiPBarSliderCell class]];
+                }
+            }
+        }
     }
     return _specifiers;
 }
@@ -44,23 +55,7 @@
     [super setPreferenceValue:value forSpecifier:specifier];
     NSString *key = [specifier propertyForKey:@"key"];
     if (key) pip_setGlobalPref(key, value);
-    // v0.6：滑块当前值写进行标题（不 reload 表格 —— reload 会打断拖动手势；
-    // 单元格下次自然重渲染 / 重进页面时即可见）
-    [self pipRefreshSliderTitle:specifier];
-}
-
-// 把两个滑块的标题带上当前值，如「外框宽度（顶/左右边框粗细）: 8 pt」
-- (void)pipRefreshSliderTitle:(PSSpecifier *)spec {
-    NSString *key = [spec propertyForKey:@"key"];
-    if (key == nil) return;
-    id val = [self readPreferenceValue:spec];
-    if (val == nil) return;
-    CGFloat f = [val floatValue];
-    NSString *base = nil;
-    if ([key isEqualToString:@"FrameWidth"])      base = @"外框宽度（顶/左右边框粗细）";
-    else if ([key isEqualToString:@"BarHeight"])  base = @"底部高度（视频下方黑边条）";
-    else return;
-    spec.name = [NSString stringWithFormat:@"%@: %.0f pt", base, f];
+    // 实时数值由 PiPBarSliderCell 自绘（不走 reload，不打断拖动）
 }
 
 // 兜底镜像：打开设置页时把各开关当前值从 suite 同步到全局文件，
@@ -74,7 +69,6 @@
         if (!key) continue;
         id val = [d objectForKey:key];
         if (val) pip_setGlobalPref(key, val);   // 仅镜像有显式值的 key；nil 跳过
-        [self pipRefreshSliderTitle:spec];      // v0.6：滑块标题带上当前值
     }
 }
 
