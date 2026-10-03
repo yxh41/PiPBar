@@ -19,6 +19,7 @@
 #import <UIKit/UIKit.h>
 #import <Preferences/PSSpecifier.h>
 #import <objc/runtime.h>
+#import <math.h>
 #import "PiPBarPrefsBridge.h"
 
 @interface PSListController (PIPSetPrefForward)
@@ -35,7 +36,7 @@
 static const void *kPiPSliderBoundKey = &kPiPSliderBoundKey;   // 已挂 target 标记
 static const void *kPiPSliderPrefKey  = &kPiPSliderPrefKey;    // 属于哪个偏好项
 static const void *kPiPSliderCellKey  = &kPiPSliderCellKey;    // 记住所属 cell（弱）
-static const void *kPiPValueLabelKey  = &kPiPValueLabelKey;    // 滑块最右侧当前值标签
+static const void *kPiPSliderHitLayerKey = &kPiPSliderHitLayerKey; // v0.21 整行命中层（弱）
 
 // 设置面板自己的文件日志（独立文件，方便与 tweak 日志一起回传）
 // v0.14：加 256KB 上限自动清空重记 —— 上一版因判重失效被刷到 3.4MB。
@@ -176,6 +177,22 @@ static void pipPrefsLogImpl(NSString *line) {
         objc_setAssociatedObject(sl, kPiPSliderBoundKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         bound++;
 
+        // v0.21：**扩大滑条命中区**（用户反馈「很难拉，也可能是反应太慢」）。
+        // 做法：不改 slider.frame（v0.19 教训，会破坏手势联动），而是挂一个
+        // 覆盖整行的透明手势层，捕获触摸后**直接把 value 设到该点**，
+        // 并同步触发 UIControlEventValueChanged —— 等于自己实现"点哪到哪"。
+        // 这样手指不必精确按在细滑轨上，横向拖到哪就是哪。
+        UIView *hitLayer = [self pipEnsureHitLayerForSlider:sl inCell:cell];
+        if (hitLayer != nil) {
+            UITapGestureRecognizer *tap =
+                [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(pipSliderTap:)];
+            [hitLayer addGestureRecognizer:tap];
+            UIPanGestureRecognizer *pan =
+                [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pipSliderPan:)];
+            [hitLayer addGestureRecognizer:pan];
+            objc_setAssociatedObject(sl, kPiPSliderHitLayerKey, hitLayer, OBJC_ASSOCIATION_ASSIGN);
+        }
+
         // 进页面先把当前值写进标题 + 建好右侧说明小字
         [self pipUpdateTitleForSlider:sl key:key value:sl.value];
         [self pipLayoutSliderRowInCell:cell];
@@ -197,26 +214,22 @@ static void pipPrefsLogImpl(NSString *line) {
     pipPrefsLog(@"bind: 扫描到 cell=%d，本轮新绑定=%d", (int)cells.count, bound);
 }
 
-// 数值显示：v0.19 彻底避开滑条 —— 标题与数值都缩小，**一起放到滑条【上方】一行**，
-// 左标题右数值，滑条独占下方整行。此前把数值放右侧仍会与滑条右端重叠（真机反馈）。
+// 数值显示：v0.21 数值放到**名称前面**（如「8 外框宽度」）—— 用户要求「左上那 4 个字
+// 不能放数值前面吗」。滑条几何依旧完全交还系统（v0.19 教训：改 frame 会破坏手势联动）。
 - (void)pipUpdateTitleForSlider:(UISlider *)sl key:(NSString *)key value:(CGFloat)f {
     NSString *base = [self pipBaseNameForKey:key];
     if (base == nil) return;
     UITableViewCell *cell = objc_getAssociatedObject(sl, kPiPSliderCellKey);
-    NSString *txt = [NSString stringWithFormat:@"%@：%.0f pt", base, f];
+    NSString *txt = [NSString stringWithFormat:@"%.0f pt　%@", f, base];
 
     if (cell != nil) {
-        // 标题缩小（14→12pt）并置于左上
+        // 标题：11pt 灰字放左上，文字形如「8 pt　外框宽度」⇒ 数值在名称之前
         UILabel *title = cell.textLabel;
         if (title != nil) {
-            if (![title.text isEqualToString:base]) title.text = base;
-            title.font = [UIFont systemFontOfSize:12.0];
+            if (![title.text isEqualToString:txt]) title.text = txt;
+            title.font = [UIFont systemFontOfSize:11.0];
             title.textColor = [UIColor secondaryLabelColor];
         }
-        // 当前值：滑条上方右对齐小字
-        UILabel *val = [self pipEnsureValueLabelForCell:cell];
-        NSString *vt = [NSString stringWithFormat:@"%.0f", f];
-        if (![val.text isEqualToString:vt]) val.text = vt;
         [self pipLayoutSliderRowInCell:cell];
     }
     for (PSSpecifier *spec in _specifiers) {
@@ -230,24 +243,6 @@ static void pipPrefsLogImpl(NSString *line) {
     return nil;
 }
 
-// 滑条上方的当前值标签（12pt 半粗体，等宽数字）
-- (UILabel *)pipEnsureValueLabelForCell:(UITableViewCell *)cell {
-    if (cell == nil) return nil;
-    UILabel *val = objc_getAssociatedObject(cell, kPiPValueLabelKey);
-    if (val == nil) {
-        val = [[UILabel alloc] initWithFrame:CGRectZero];
-        val.font = [UIFont monospacedDigitSystemFontOfSize:12.0 weight:UIFontWeightSemibold];
-        val.textColor = [UIColor labelColor];
-        val.textAlignment = NSTextAlignmentRight;
-        val.userInteractionEnabled = NO;    // 不吃触摸，绝不挡滑条
-        // v0.20：插到**最底层** —— PSSliderCell 的滑条是 contentView 的既有子视图，
-        // 我们后加的标签默认盖在最上层；虽然 userInteractionEnabled=NO 已让它不吃触摸，
-        // 但插到底层更稳妥，彻底杜绝「滑块滑不动」的可能。
-        [cell.contentView insertSubview:val atIndex:0];
-        objc_setAssociatedObject(cell, kPiPValueLabelKey, val, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    return val;
-}
 
 // v0.20 布局：**绝不改 UISlider 的 frame**。
 // v0.19 手工把滑条压到下方（`sl.frame = ...`），后果有两个（真机反馈）：
@@ -260,23 +255,67 @@ static void pipPrefsLogImpl(NSString *line) {
     if (cell == nil) return;
     CGFloat w = CGRectGetWidth(cell.contentView.bounds);
     if (w < 10.0) return;      // 布局未就绪，等下一次
-    CGFloat pad = 14.0;
-    CGFloat topH = 13.0;
-
-    // 标题：左上，小字灰
+    // 标题（含数值）在左上独占一行；滑条完全交给系统，**绝不改其 frame**。
     UILabel *title = cell.textLabel;
     if (title != nil) {
-        title.font = [UIFont systemFontOfSize:11.0];
-        title.textColor = [UIColor secondaryLabelColor];
-        title.frame = CGRectMake(pad, 1.0, w * 0.62 - pad, topH);
+        title.frame = CGRectMake(14.0, 1.0, w - 28.0, 13.0);
     }
-    // 数值：右上（与标题同一行，绝不与滑条重叠）
-    UILabel *val = objc_getAssociatedObject(cell, kPiPValueLabelKey);
-    if (val != nil) {
-        [val sizeToFit];
-        CGFloat vw = MAX(CGRectGetWidth(val.bounds) + 4.0, 26.0);
-        val.frame = CGRectMake(w - vw - pad, 1.0, vw, topH);
+    // v0.21：同步整行命中层位置（滑条 frame 由系统决定，故每次布局都要跟一次）
+    UISlider *sl = [self pipFindSliderIn:cell];
+    if (sl != nil) {
+        [self pipLayoutHitLayer:objc_getAssociatedObject(sl, kPiPSliderHitLayerKey)
+                         inCell:cell slider:sl];
     }
+}
+
+// v0.21：覆盖整行的透明命中层（放在滑条**之下**，不抢滑条自身手势）
+- (UIView *)pipEnsureHitLayerForSlider:(UISlider *)sl inCell:(UITableViewCell *)cell {
+    UIView *old = objc_getAssociatedObject(sl, kPiPSliderHitLayerKey);
+    if (old != nil) return old;
+    UIView *layer = [[UIView alloc] initWithFrame:CGRectZero];
+    layer.backgroundColor = UIColor.clearColor;
+    layer.userInteractionEnabled = YES;
+    [cell.contentView insertSubview:layer belowSubview:sl];
+    objc_setAssociatedObject(sl, kPiPSliderHitLayerKey, layer, OBJC_ASSOCIATION_ASSIGN);
+    return layer;
+}
+
+// 命中层布局：整行可点（标题行 + 滑条行都算）
+- (void)pipLayoutHitLayer:(UIView *)layer inCell:(UITableViewCell *)cell slider:(UISlider *)sl {
+    if (layer == nil || cell == nil) return;
+    CGFloat w = CGRectGetWidth(cell.contentView.bounds);
+    if (w < 10.0) return;
+    CGFloat top = CGRectGetMinY(sl.frame) - 2.0;
+    CGFloat h = CGRectGetHeight(sl.frame) + 4.0;
+    if (h < 28.0) { top = CGRectGetMinY(sl.frame) - 10.0; h = CGRectGetHeight(sl.frame) + 20.0; }
+    layer.frame = CGRectMake(0.0, MAX(0.0, top), w, h);
+}
+
+// 触摸 x → 滑条 value（并广播 UIControlEventValueChanged，走同一条写偏好链路）
+- (void)pipApplyTouchToSlider:(UISlider *)sl atX:(CGFloat)x {
+    CGFloat trackW = CGRectGetWidth(sl.frame);
+    if (trackW < 1.0) return;
+    CGFloat r = (x - CGRectGetMinX(sl.frame)) / trackW;
+    if (r < 0.0) r = 0.0;
+    if (r > 1.0) r = 1.0;
+    CGFloat v = sl.minimumValue + r * (sl.maximumValue - sl.minimumValue);
+    if (fabs(v - sl.value) < 0.01) return;
+    sl.value = v;
+    [sl sendActionsForControlEvents:UIControlEventValueChanged];
+}
+
+- (void)pipSliderTap:(UITapGestureRecognizer *)gr {
+    UIView *layer = gr.view;
+    UISlider *sl = [self pipFindSliderIn:layer.superview];
+    if (sl == nil) return;
+    [self pipApplyTouchToSlider:sl atX:[gr locationInView:layer].x];
+}
+
+- (void)pipSliderPan:(UIPanGestureRecognizer *)gr {
+    UIView *layer = gr.view;
+    UISlider *sl = [self pipFindSliderIn:layer.superview];
+    if (sl == nil) return;
+    [self pipApplyTouchToSlider:sl atX:[gr locationInView:layer].x];
 }
 
 - (void)pipSliderChanged:(UISlider *)sender {

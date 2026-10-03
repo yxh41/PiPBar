@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.19"
+#define PIP_BUILD_TAG @"v0.20"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -696,11 +696,11 @@ static NSString *pipTimeText(double sec) {
     CGFloat w = CGRectGetWidth(self.trackRect);
     if (w < 1.0 || gMRDuration <= 0) return;
     CGPoint p = [gr locationInView:self];
-    // v0.18：自由态下整块视频都会命中本壳，拖动进度条会与「自由拖动」pan 抢手势。
-    // 判据：起点必须落在进度条热区内，否则不参与（让自由拖动正常生效）。
-    CGRect hot = CGRectInset(self.trackRect, 0, -14.0);
+    // v0.20：热区从 ±14pt 放宽到 **±20pt**。进度条本身只有 3pt 高，
+    // 原热区虽加了 14pt 上下，但用户反馈「很难拉动」—— 手指按不准 3pt 细线。
+    // 进度条位于底部黑边内，±20pt 不会侵入视频画面区。
+    CGRect hot = CGRectInset(self.trackRect, -8.0, -20.0);
     if (!CGRectContainsPoint(hot, p)) return;
-    self.seeking = NO;   // 交由后续状态分支处理（避免重复进入）
 
     if (gr.state == UIGestureRecognizerStateBegan) {
         self.seeking = YES;
@@ -798,11 +798,15 @@ static NSString *pipTimeText(double sec) {
     BOOL showProg = gShowBarProgress && gMRDuration > 1.0 && gEnabled && !gExpandedUI;
     if (showProg) {
         // 进度条居中于黑边，横向近乎铺满；上下留出可点按的热区
-        CGFloat ty = CGRectGetMaxY(vr) + chin / 2.0 - 1.5;
+        // v0.20：轨道由 3pt 加粗到 5pt（用户反馈「很难拉动」）—— 3pt 细线在
+        // PiP 这种小尺寸下几乎点不准，加粗后肉眼可见、手指也容易命中。
+        CGFloat trackH = 5.0;
+        CGFloat ty = CGRectGetMaxY(vr) + chin / 2.0 - trackH / 2.0;
         self.trackRect = CGRectMake(CGRectGetMinX(vr) + inset, ty,
-                                    vrW - inset * 2.0, 3.0);
+                                    vrW - inset * 2.0, trackH);
         self.trackLayer.path =
-            [UIBezierPath bezierPathWithRoundedRect:self.trackRect cornerRadius:1.5].CGPath;
+            [UIBezierPath bezierPathWithRoundedRect:self.trackRect
+                                       cornerRadius:trackH / 2.0].CGPath;
     } else {
         self.trackRect = CGRectZero;
         self.trackLayer.path = nil;
