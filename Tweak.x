@@ -273,6 +273,29 @@ static void pipMRRefresh(void) {
 
 #pragma mark - 外框 + 按钮条
 
+@interface PIPFrameView : UIView <UIGestureRecognizerDelegate>
+@property (nonatomic, strong) CAShapeLayer *caseLayer;
+@property (nonatomic, strong) CAShapeLayer *edgeLayer;
+@property (nonatomic, strong) CAShapeLayer *barLayer;
+// v0.15 进度条：轨道 / 已播放 / 拖动拇指 / 时间标签 / 拖动手势
+@property (nonatomic, strong) CAShapeLayer *trackLayer;
+@property (nonatomic, strong) CAShapeLayer *fillLayer;
+@property (nonatomic, strong) CALayer *thumbLayer;
+@property (nonatomic, strong) UILabel *timeLabel;
+@property (nonatomic, strong) UIPanGestureRecognizer *seekPan;
+@property (nonatomic, strong) UITapGestureRecognizer *seekTap;
+// v0.23：自由态（解除吸附）专用关闭按钮 —— 自由态下整块视频被壳接管，
+// 原生控制条（播放/还原/关闭）点不到，故在外框右上角加一个关闭入口。
+@property (nonatomic, strong) UIButton *closeButton;
+// v0.11：外框矩形（本壳坐标系，含底部黑边）—— 供 pointInside 扩展命中区用
+@property (nonatomic, assign) CGRect hitRect;
+// v0.15：拖动中（此时进度由手指决定，不被心跳覆盖）
+@property (nonatomic, assign) BOOL seeking;
+@property (nonatomic, assign) CGRect trackRect;
+- (void)pipSelfHeal;
+- (void)pipRefreshProgress;
+@end
+
 @class PIPFrameView;   // 前置声明：下面的文件级静态指针在 @interface 之前，需先告诉编译器类型
 static UIView *pipPickHostView(UIViewController *content);   // 前向声明（layoutSubviews 里复用）
 
@@ -334,29 +357,6 @@ static void pipApplyFreeMovePref(void) {
     if (gInstalledFrame != nil) gInstalledFrame.closeButton.hidden = !gFreeMove; // v0.23
     PIPLog(@"free-move %@（来自设置）", gFreeMove ? @"开" : @"关");
 }
-
-@interface PIPFrameView : UIView <UIGestureRecognizerDelegate>
-@property (nonatomic, strong) CAShapeLayer *caseLayer;
-@property (nonatomic, strong) CAShapeLayer *edgeLayer;
-@property (nonatomic, strong) CAShapeLayer *barLayer;
-// v0.15 进度条：轨道 / 已播放 / 拖动拇指 / 时间标签 / 拖动手势
-@property (nonatomic, strong) CAShapeLayer *trackLayer;
-@property (nonatomic, strong) CAShapeLayer *fillLayer;
-@property (nonatomic, strong) CALayer *thumbLayer;
-@property (nonatomic, strong) UILabel *timeLabel;
-@property (nonatomic, strong) UIPanGestureRecognizer *seekPan;
-@property (nonatomic, strong) UITapGestureRecognizer *seekTap;
-// v0.23：自由态（解除吸附）专用关闭按钮 —— 自由态下整块视频被壳接管，
-// 原生控制条（播放/还原/关闭）点不到，故在外框右上角加一个关闭入口。
-@property (nonatomic, strong) UIButton *closeButton;
-// v0.11：外框矩形（本壳坐标系，含底部黑边）—— 供 pointInside 扩展命中区用
-@property (nonatomic, assign) CGRect hitRect;
-// v0.15：拖动中（此时进度由手指决定，不被心跳覆盖）
-@property (nonatomic, assign) BOOL seeking;
-@property (nonatomic, assign) CGRect trackRect;
-- (void)pipSelfHeal;
-- (void)pipRefreshProgress;
-@end
 
 // —— 命中区扩展（v0.11）——
 // 根因（v0.5 三按钮点不到、v0.9 按钮不敢放黑边的共同根因）：PiP 窗口的 hitTest
@@ -653,15 +653,18 @@ static void pipStopPiP(void) {
     NSMutableArray *objs = [NSMutableArray array];
     Class ctl = objc_getClass("SBPIPController");
     if (ctl != nil && [ctl respondsToSelector:@selector(sharedInstance)]) {
-        id inst = [ctl performSelector:@selector(sharedInstance)];
+        // 用 objc_msgSend 强转，规避 -Warc-performSelector-leaks（动态 selector 编译器未知返回值）
+        id (*getInst)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+        id inst = getInst(ctl, @selector(sharedInstance));
         if (inst != nil) [objs addObject:inst];
     }
     if (gContentVC != nil) [objs addObject:gContentVC];
+    void (*sendMsg)(id, SEL) = (void (*)(id, SEL))objc_msgSend;
     for (id o in objs) {
         for (NSString *name in sels) {
             SEL s = NSSelectorFromString(name);
             if ([o respondsToSelector:s]) {
-                [o performSelector:s];
+                sendMsg(o, s);
                 PIPLog(@"close PiP via [%@ %@]", NSStringFromClass([o class]), name);
                 return;
             }
@@ -834,19 +837,19 @@ static NSString *pipTimeText(double sec) {
     }
     if (sup == nil || host == nil || host.window == nil) return;
 
-    // v0.23：自由态关闭按钮 — 钉在视频右上角（外框内）。视频矩形刚算好，布局跟随。
+
+    // 视频矩形换算到本画布坐标 —— 壳就是绕着它向外扩的
+    CGRect vr = [host convertRect:host.bounds toView:self];
+    CGFloat vrW = CGRectGetWidth(vr), vrH = CGRectGetHeight(vr);
+    if (vrW < 8.0 || vrH < 8.0) return;
+
+    // v0.23：自由态关闭按钮 — 钉在视频右上角（外框内）。vr 已算好，布局跟随。
     if (self.closeButton != nil && !self.closeButton.hidden) {
         CGFloat bs = 36.0;
         self.closeButton.frame = CGRectMake(CGRectGetMaxX(vr) - bs - 8.0,
                                             CGRectGetMinY(vr) + 8.0, bs, bs);
         [self bringSubviewToFront:self.closeButton];
     }
-
-
-    // 视频矩形换算到本画布坐标 —— 壳就是绕着它向外扩的
-    CGRect vr = [host convertRect:host.bounds toView:self];
-    CGFloat vrW = CGRectGetWidth(vr), vrH = CGRectGetHeight(vr);
-    if (vrW < 8.0 || vrH < 8.0) return;
 
     // v0.8：全屏判定收紧 —— 旧「>60% 屏宽」会把放大档 PiP（约 2/3~9/10 屏宽，
     // 用户截图实锤）误判成全屏而整壳隐藏。只有宽、高同时 ≈ 屏幕才算全屏播放。
