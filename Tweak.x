@@ -39,9 +39,9 @@
 static BOOL gEnabled = YES;
 static BOOL gShowFrame = YES;
 static BOOL gShowButtons = YES;
-static BOOL gFileLog = NO;
+static BOOL gFileLog = YES;       // 默认开：日志是排障生命线，别让用户摸黑
 static BOOL gDebugLog = NO;
-static CGFloat gFrameW = 12.0;    // 顶/左右边框宽
+static CGFloat gFrameW = 8.0;     // 顶/左右边框宽（用户反馈 12 太粗 → 默认 8）
 static CGFloat gBarH = 40.0;      // 底部控制条高
 
 // roothide per-app 容器隔离：Settings 里 CFPreferences 写的域，SpringBoard 读不到
@@ -125,14 +125,25 @@ static BOOL gPlaying = YES;   // 最近一次已知的播放状态
 // 视频宿主（弱引用）：壳要「包在视频外面」，必须随时知道视频矩形在哪。
 static __weak UIView *gVideoHost = nil;
 
+// —— 按钮的触摸问题（v0.4 真机实锤）——
+// PiP 窗口边界 = 视频矩形，底条在窗口【外面】。窗口外的触摸根本不会派发给这个窗口，
+// 所以按钮画得再对也是「看得见点不到」。修法：按钮搬进一个独立的悬浮 UIWindow
+// （windowLevel = PiP 窗口 +1），只吃按钮触摸、其余穿透；位置由显示链每帧同步。
+static CGRect gLastStrip = CGRectZero;     // 底条矩形（frame 画布坐标），layoutSubviews 维护
+static BOOL gExpandedUI = NO;              // PiP 展开成大窗时把壳和按钮都收起来
+static UIWindow *gTouchWindow = nil;       // PIPBarTouchWindow，按钮宿主
+static CADisplayLink *gSyncLink = nil;     // 跟随 PiP 拖动/缩放的同步心跳（仅 PiP 存活期间）
+static PIPFrameView *gInstalledFrame = nil;   // 当前壳（同步链路与 reload 都要用，前置声明）
+
 // 造型对齐参考图（安卓 PiP 同款）：黑色圆角「手机壳」**套在视频外面**——
-//   视频矩形不动，壳画在容器层、向外扩：顶/左右 = gFrameW，底部 = gBarH 放按钮。
+//   视频矩形不动，壳画在容器层、向外扩：顶/左右 = gFrameW，底部 = gBarH。
 // 实现：CAShapeLayer even-odd（外圈圆角矩形挖掉【视频矩形】这个洞）+ 内沿发丝高光 + 投影。
-// v0.3 的错误：壳画在视频层内部、内框式盖住视频边缘 —— 用户明确要「外框不是内框」。
+// 注意：shadowPath 必须只用外圈路径 —— v0.4 用带洞路径当 shadowPath，投影顺着洞
+// 投进视频区，画面像蒙了层黑遮罩（v0.5 用户反馈实锤）。
 @interface PIPFrameView : UIView
-@property (nonatomic, copy) void (^onTap)(NSInteger tag);
 @property (nonatomic, strong) CAShapeLayer *caseLayer;
 @property (nonatomic, strong) CAShapeLayer *edgeLayer;
+- (void)pipSelfHeal;
 @end
 
 // 缓存图标：play/pause 随播放状态切换（v0.3 用户反馈「播放暂停不会变化」）
@@ -142,12 +153,135 @@ static UIImage *pipIcon(BOOL playing) {
         playImg  = [UIImage systemImageNamed:@"play.fill"];
         pauseImg = [UIImage systemImageNamed:@"pause.fill"];
     }
-    // 固定 15pt：小而精致（用户明确嫌 v0.3 的 20pt 大）；不跟 Dynamic Type 忽大忽小
+    // 固定 15pt：小而精致；不跟 Dynamic Type 忽大忽小
     UIImage *base = playing ? pauseImg : playImg;
     if (base == nil) return nil;
     UIImage *sized = [base imageWithConfiguration:
                       [UIImageSymbolConfiguration configurationWithPointSize:15.0]];
     return sized != nil ? sized : base;
+}
+
+// —— 按钮宿主窗口：透明、只吃按钮触摸 ——
+@interface PIPBarTouchWindow : UIWindow
+@property (nonatomic, copy) void (^onTap)(NSInteger tag);
+@end
+
+@implementation PIPBarTouchWindow
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.backgroundColor = UIColor.clearColor;
+        self.hidden = YES;            // 等同步链路给出准确位置再亮出来
+        [self addButtonWithTag:1];
+        [self addButtonWithTag:2];
+        [self addButtonWithTag:3];
+    }
+    return self;
+}
+
+- (void)addButtonWithTag:(NSInteger)tag {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.tag = tag;
+    b.tintColor = UIColor.whiteColor;
+    UIImage *img = nil;
+    if (tag == 2) {
+        img = pipIcon(gPlaying);
+    } else {
+        UIImage *base = [UIImage systemImageNamed:(tag == 1 ? @"backward.end.fill"
+                                                            : @"forward.end.fill")];
+        if (base != nil) {
+            UIImage *sized = [base imageWithConfiguration:
+                              [UIImageSymbolConfiguration configurationWithPointSize:15.0]];
+            img = sized != nil ? sized : base;
+        }
+    }
+    if (img != nil) {
+        [b setImage:img forState:UIControlStateNormal];
+    } else {
+        // SF Symbol 名字漂移时的兜底：不至于是空按钮
+        [b setTitle:(tag == 1 ? @"◀◀" : (tag == 2 ? @"▶" : @"▶▶")) forState:UIControlStateNormal];
+        b.titleLabel.font = [UIFont boldSystemFontOfSize:12.0];
+    }
+    [b addTarget:self action:@selector(buttonTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [self addSubview:b];
+}
+
+- (void)buttonTapped:(UIButton *)sender {
+    if (self.onTap != nil) self.onTap(sender.tag);
+}
+
+// 整窗透明铺在 PiP 周围：只有摸到按钮才接管，其余全部穿透（不干扰主屏/拖动）
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hit = [super hitTest:point withEvent:event];
+    return (hit == self) ? nil : hit;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat w = CGRectGetWidth(self.bounds);
+    CGFloat h = CGRectGetHeight(self.bounds);
+    if (w <= 0.0 || h <= 0.0) return;
+    CGFloat xs[3] = {0.20, 0.50, 0.80};
+    CGFloat btnW = 44.0, btnH = 32.0;
+    CGFloat by = (h - btnH) / 2.0;
+    NSUInteger i = 0;
+    for (UIView *v in self.subviews) {
+        if (![v isKindOfClass:[UIButton class]]) continue;
+        CGFloat cx = w * xs[i];
+        v.frame = CGRectMake(cx - btnW / 2.0, by, btnW, btnH);   // 必须 frame，不是 center（v0.2 踩坑）
+        if (v.tag == 2) [(UIButton *)v setImage:pipIcon(gPlaying) forState:UIControlStateNormal];
+        i++;
+    }
+}
+
+@end
+
+// —— 位置同步：显示链心跳，只在 PiP 存活期间跑（30fps，拖动/缩放全程跟随）——
+@interface PIPSyncSink : NSObject
+- (void)tick:(CADisplayLink *)link;
+@end
+
+// 底条矩形（画布坐标）→ 屏幕坐标，搬到按钮窗口上
+static void pipSyncTouchWindow(void) {
+    PIPBarTouchWindow *tw = (PIPBarTouchWindow *)gTouchWindow;
+    if (tw == nil) return;
+    PIPFrameView *f = gInstalledFrame;
+    UIView *host = gVideoHost;
+    if (f == nil || host == nil || host.window == nil || host.window.hidden
+        || !gEnabled || !gShowButtons || gExpandedUI || CGRectIsNull(gLastStrip)) {
+        tw.hidden = YES;
+        return;
+    }
+    tw.hidden = NO;
+    tw.windowLevel = host.window.windowLevel + 1.0;
+    CGRect r = [f convertRect:gLastStrip toCoordinateSpace:UIScreen.mainScreen.coordinateSpace];
+    if (!CGRectEqualToRect(tw.frame, r)) {
+        tw.frame = r;
+        [tw setNeedsLayout];
+    }
+}
+
+@implementation PIPSyncSink
+- (void)tick:(CADisplayLink *)link {
+    UIView *host = gVideoHost;
+    if (host == nil || host.window == nil || host.window.hidden) {
+        [link invalidate];
+        if (gTouchWindow != nil) gTouchWindow.hidden = YES;
+        gSyncLink = nil;   // 下次 PiP 起来时 pipEnsureSyncLink 会重建
+        return;
+    }
+    pipSyncTouchWindow();
+}
+@end
+
+static void pipEnsureSyncLink(void) {
+    if (gSyncLink != nil) return;
+    CADisplayLink *l = [CADisplayLink displayLinkWithTarget:[[PIPSyncSink alloc] init]
+                                                   selector:@selector(tick:)];
+    l.preferredFramesPerSecond = 30;
+    [l addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    gSyncLink = l;
 }
 
 @implementation PIPFrameView
@@ -165,9 +299,9 @@ static UIImage *pipIcon(BOOL playing) {
         self.caseLayer.fillColor = [UIColor colorWithWhite:0.07 alpha:1.0].CGColor;
         self.caseLayer.fillRule = kCAFillRuleEvenOdd;
         self.caseLayer.masksToBounds = NO;
-        // 质感三件套之一：外投影（把壳从背后内容里「托」出来）
+        // 质感三件套之一：外投影（shadowPath 只圈外圈，绝不投进视频洞里）
         self.caseLayer.shadowColor = [UIColor blackColor].CGColor;
-        self.caseLayer.shadowOpacity = 0.40;
+        self.caseLayer.shadowOpacity = 0.35;
         self.caseLayer.shadowRadius = 6.0;
         self.caseLayer.shadowOffset = CGSizeMake(0, 3);
         // 之二：内沿发丝高光（1px 白 12%，模拟机身边缘倒角）
@@ -177,69 +311,35 @@ static UIImage *pipIcon(BOOL playing) {
         self.edgeLayer.lineWidth = 1.0;
         self.edgeLayer.masksToBounds = NO;
         [self.layer addSublayer:self.edgeLayer];
-        [self addButtonWithTag:1 symbol:nil];
-        [self addButtonWithTag:2 symbol:nil];
-        [self addButtonWithTag:3 symbol:nil];
-        // 初始错位无所谓 —— layoutSubviews 按视频矩形全量重算
         [self setNeedsLayout];
     }
     return self;
 }
 
-- (void)addButtonWithTag:(NSInteger)tag symbol:(NSString *)symbol {
-    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-    b.tag = tag;
-    b.tintColor = UIColor.whiteColor;
-    UIImage *img = nil;
-    if (tag == 2) img = pipIcon(gPlaying);
-    else {
-        UIImage *base = [UIImage systemImageNamed:(tag == 1 ? @"backward.end.fill"
-                                                            : @"forward.end.fill")];
-        if (base != nil) {
-            UIImage *sized = [base imageWithConfiguration:
-                              [UIImageSymbolConfiguration configurationWithPointSize:15.0]];
-            img = sized != nil ? sized : base;
-        }
-    }
-    if (img != nil) {
-        [b setImage:img forState:UIControlStateNormal];
-    } else {
-        // SF Symbol 名字漂移时的兜底：不至于是空按钮
-        [b setTitle:(tag == 1 ? @"◀◀" : (tag == 2 ? @"▶" : @"▶▶")) forState:UIControlStateNormal];
-        b.titleLabel.font = [UIFont boldSystemFontOfSize:12.0];
-    }
-    [b addTarget:self action:@selector(buttonTapped:) forControlEvents:UIControlEventTouchUpInside];
-    // ⚠️ 按钮必须直接挂在 self 上，且给【显式 frame】。
-    // v0.2 踩坑：只设 center —— 用 CGRectZero 创建、translatesAutoresizingMask=YES 的视图
-    // center 设了尺寸仍是 0×0，三颗按钮全部「存在但不可见」。
-    [self addSubview:b];
-}
-
-- (void)buttonTapped:(UIButton *)sender {
-    if (self.onTap != nil) self.onTap(sender.tag);
-}
-
-// 我们是铺满容器的透明覆盖层。若不拦这一刀，命中会落到 self 上，
-// PiP 原生的「拖动 / 单击展开 / 双击缩放」就全被吃掉了。
-// 按钮是 self 的直接子视图：落在按钮上 hit 返回按钮（放行），其余一律穿透回 Pegasus。
+// 整层透明铺在容器上：只放行子视图上的触摸（现在没有子视图了，恒穿透），
+// 否则 PiP 原生的「拖动 / 单击展开 / 双击缩放」会被吃掉。
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
     return (hit == self) ? nil : hit;
 }
 
-// 全部按【当前视频矩形 + 当前偏好】重算 —— 偏好热更新也走这里（setNeedsLayout）
-- (void)layoutSubviews {
-    [super layoutSubviews];
-
+// 自愈：安装瞬间父 bounds 可能是 0，autoresize 救不回来 —— 每次布局先对齐父 bounds
+- (void)pipSelfHeal {
     UIView *sup = self.superview;
     if (sup != nil && CGRectGetWidth(sup.bounds) > 1.0 && CGRectGetHeight(sup.bounds) > 1.0
         && !CGRectEqualToRect(self.frame, sup.bounds)) {
-        self.frame = sup.bounds;          // 触发下一轮 layoutSubviews，届时已相等，不会死循环
-        return;
+        self.frame = sup.bounds;   // 触发下一轮 layoutSubviews，届时已相等，不会死循环
     }
+}
+
+// 全部按【当前视频矩形 + 当前偏好】重算 —— 偏好热更新也走这里（setNeedsLayout）
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    [self pipSelfHeal];
 
     CGFloat sw = gFrameW, bh = gBarH;
     UIView *host = gVideoHost;
+    UIView *sup = self.superview;
     if (sup == nil || host == nil || host.window == nil) return;
 
     // 视频矩形换算到本画布坐标 —— 壳就是绕着它向外扩的
@@ -247,48 +347,39 @@ static UIImage *pipIcon(BOOL playing) {
     CGFloat vrW = CGRectGetWidth(vr), vrH = CGRectGetHeight(vr);
     if (vrW < 8.0 || vrH < 8.0) return;
 
-    self.hidden = !gEnabled || (!gShowFrame && !gShowButtons);
+    // PiP 展开成大窗（>60% 屏宽）时不画壳也不放按钮
+    gExpandedUI = CGRectGetWidth(self.bounds) >
+                  [UIScreen mainScreen].bounds.size.width * 0.6;
+    self.hidden = !gEnabled || (!gShowFrame && !gShowButtons) || gExpandedUI;
 
     CGRect outer = CGRectMake(CGRectGetMinX(vr) - sw, CGRectGetMinY(vr) - sw,
                               vrW + sw * 2.0, vrH + sw + bh);
+    gLastStrip = CGRectMake(CGRectGetMinX(outer), CGRectGetMaxY(vr),
+                            CGRectGetWidth(outer), bh);
 
     // 圆角：内洞贴视频自身圆角，外圈随边宽外扩
     CGFloat innerR = host.layer.cornerRadius;
     if (innerR < 2.0 || innerR > 40.0) innerR = 16.0;
     CGFloat outerR = innerR + sw;
 
-    self.caseLayer.hidden = !gShowFrame;
-    self.edgeLayer.hidden = !gShowFrame;
-    if (gShowFrame && outer.size.width > 8.0 && outer.size.height > 8.0) {
+    self.caseLayer.hidden = !gShowFrame || gExpandedUI;
+    self.edgeLayer.hidden = !gShowFrame || gExpandedUI;
+    if (gShowFrame && !gExpandedUI && outer.size.width > 8.0 && outer.size.height > 8.0) {
         UIBezierPath *op = [UIBezierPath bezierPathWithRoundedRect:outer cornerRadius:outerR];
         UIBezierPath *ip = [UIBezierPath bezierPathWithRoundedRect:vr cornerRadius:innerR];
         [op appendPath:ip];   // even-odd：视频矩形挖空，画面原样透出
         self.caseLayer.path = op.CGPath;
-        self.caseLayer.shadowPath = op.CGPath;
+        // ⚠️ 投影只用外圈路径 —— 带洞路径会把投影投进视频（v0.4「蒙遮罩」根因）
+        UIBezierPath *shadowP = [UIBezierPath bezierPathWithRoundedRect:outer
+                                                           cornerRadius:outerR];
+        self.caseLayer.shadowPath = shadowP.CGPath;
         self.edgeLayer.path = ip.CGPath;   // 发丝高光勾在洞口一圈
     } else {
         self.caseLayer.path = nil;
         self.edgeLayer.path = nil;
     }
 
-    // —— 底部条三颗按钮：0.20 / 0.50 / 0.80 处，44x32 小而精致（用户明确要求缩小）——
-    CGFloat xs[3] = {0.20, 0.50, 0.80};
-    CGFloat btnW = 44.0, btnH = 32.0;
-    CGFloat stripTop = CGRectGetMaxY(vr);
-    CGFloat stripH = bh;
-    if (stripH < btnH + 2.0) btnH = stripH - 2.0 > 16.0 ? stripH - 2.0 : btnH;
-    CGFloat by = stripTop + (stripH - btnH) / 2.0;
-    NSUInteger i = 0;
-    for (UIView *v in self.subviews) {
-        if (![v isKindOfClass:[UIButton class]]) continue;
-        CGFloat cx = CGRectGetMinX(outer) + CGRectGetWidth(outer) * xs[i];
-        v.hidden = !gShowButtons;
-        v.frame = CGRectMake(cx - btnW / 2.0, by, btnW, btnH);   // 必须 frame，不是 center（v0.2 踩坑）
-        if (v.tag == 2) {
-            [(UIButton *)v setImage:pipIcon(gPlaying) forState:UIControlStateNormal];
-        }
-        i++;
-    }
+    pipSyncTouchWindow();
 }
 
 @end
@@ -421,14 +512,15 @@ static UIView *pipPickHostView(UIViewController *content) {
 
 #pragma mark - 偏好热生效
 
-static PIPFrameView *gInstalledFrame = nil;   // 弱需求：同一时刻只有一个 PiP 实例，直接强引用可接受
 static NSString *gInstalledHostDesc = nil;
 
 static void pipApplyFrameState(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
         PIPFrameView *f = gInstalledFrame;
         if (f == nil) return;
-        [f setNeedsLayout];   // hidden 逻辑全在 layoutSubviews 里按当前偏好算
+        [f setNeedsLayout];          // 壳的 hidden/几何全在 layoutSubviews 里按当前偏好算
+        [gTouchWindow setNeedsLayout];
+        pipSyncTouchWindow();
         PIPLog(@"reload applied: enabled=%d frame=%d buttons=%d w=%.0f barh=%.0f",
                gEnabled, gShowFrame, gShowButtons, (double)gFrameW, (double)gBarH);
     });
@@ -489,39 +581,45 @@ static void pipInitPegasusOnce(void);
         PIPFrameView *frame = [[frameCls alloc] initWithFrame:canvas.bounds];
         frame.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
+        // 按钮宿主：独立 UIWindow（PiP 窗口边界=视频矩形，底条在窗外摸不到 —— v0.4 实锤）
         __weak UIViewController *weakContent = content;
-        __weak PIPFrameView *weakFrame = frame;
-        frame.onTap = ^(NSInteger tag) {
-            UIViewController *c = weakContent;
-            if (c == nil) return;
-            if (tag == 2) {
-                // 播放/暂停：Pegasus 命令通道。PGCommand 必须运行时解析（链接符号坑，v0.1 踩过）
-                Class cmdCls = objc_getClass("PGCommand");
-                SEL sel = sel_registerName("commandForSetPlaying:");
-                if (cmdCls != nil && [cmdCls respondsToSelector:sel]) {
-                    gPlaying = !gPlaying;
-                    id (*setPlaying)(id, SEL, BOOL) = (id (*)(id, SEL, BOOL))objc_msgSend;
-                    id cmd = setPlaying(cmdCls, sel, gPlaying);
-                    [(PGPictureInPictureViewController *)c handleCommand:cmd];
-                    PIPLog(@"play/pause -> setPlaying=%d", gPlaying);
-                    [weakFrame setNeedsLayout];   // 立即换 play/pause 图标
+        if (gTouchWindow == nil) {
+            PIPBarTouchWindow *tw = [[PIPBarTouchWindow alloc]
+                                     initWithFrame:CGRectMake(0, 0, 100, (CGFloat)gBarH)];
+            tw.onTap = ^(NSInteger tag) {
+                UIViewController *c = weakContent;
+                if (c == nil) return;
+                if (tag == 2) {
+                    // 播放/暂停：Pegasus 命令通道。PGCommand 必须运行时解析（链接符号坑，v0.1 踩过）
+                    Class cmdCls = objc_getClass("PGCommand");
+                    SEL sel = sel_registerName("commandForSetPlaying:");
+                    if (cmdCls != nil && [cmdCls respondsToSelector:sel]) {
+                        gPlaying = !gPlaying;
+                        id (*setPlaying)(id, SEL, BOOL) = (id (*)(id, SEL, BOOL))objc_msgSend;
+                        id cmd = setPlaying(cmdCls, sel, gPlaying);
+                        [(PGPictureInPictureViewController *)c handleCommand:cmd];
+                        PIPLog(@"play/pause -> setPlaying=%d", gPlaying);
+                        [gTouchWindow setNeedsLayout];   // 立即换 play/pause 图标
+                    } else {
+                        PIPLog(@"PGCommand/commandForSetPlaying: 不可用（类没加载或选择子漂移）");
+                    }
                 } else {
-                    PIPLog(@"PGCommand/commandForSetPlaying: 不可用（类没加载或选择子漂移）");
+                    // 上一曲(1) / 下一曲(3)：action 码待嗅探，v0.6 接通
+                    PIPLog(@"button tag=%ld — 等待嗅探结果（见 CMD/SNIFF 日志）", (long)tag);
                 }
-            } else {
-                // 上一曲(1) / 下一曲(3)：action 码待嗅探，v0.5 接通
-                PIPLog(@"button tag=%ld — 等待嗅探结果（见 CMD/SNIFF 日志）", (long)tag);
-            }
-        };
+            };
+            gTouchWindow = tw;
+        }
 
         [canvas addSubview:frame];
         [canvas bringSubviewToFront:frame];
+        pipEnsureSyncLink();
         gInstalledFrame = frame;
         gInstalledHostDesc = [NSString stringWithFormat:@"%@ over %@ (video=%@)",
                               NSStringFromClass(frame.class), NSStringFromClass(canvas.class),
                               NSStringFromClass(videoHost.class)];
-        PIPLog(@"frame installed %s video=%@ canvas=%@ videoRect=%@ (w=%.0f barh=%.0f)",
-               "outer", NSStringFromClass(videoHost.class), NSStringFromClass(canvas.class),
+        PIPLog(@"frame installed outer video=%@ canvas=%@ videoRect=%@ (w=%.0f barh=%.0f)",
+               NSStringFromClass(videoHost.class), NSStringFromClass(canvas.class),
                NSStringFromCGRect([videoHost convertRect:videoHost.bounds toView:canvas]),
                (double)gFrameW, (double)gBarH);
 
@@ -569,7 +667,7 @@ static void pipInitPegasusOnce(void);
                 BOOL nowPlaying = [rate doubleValue] > 0.0;
                 if (nowPlaying != gPlaying) {
                     gPlaying = nowPlaying;
-                    [gInstalledFrame setNeedsLayout];   // 同步 play/pause 图标
+                    [gTouchWindow setNeedsLayout];   // 同步 play/pause 图标
                 }
                 PIPLog(@"STATE diff=%@", d);
             }

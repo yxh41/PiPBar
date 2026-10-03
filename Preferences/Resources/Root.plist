@@ -74,7 +74,7 @@
 			<key>max</key>
 			<real>24</real>
 			<key>default</key>
-			<real>12</real>
+			<real>8</real>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -108,9 +108,9 @@
 			<key>label</key>
 			<string>文件日志</string>
 			<key>default</key>
-			<false/>
+			<true/>
 			<key>footnote</key>
-			<string>写入 /var/mobile/Library/Logs/PiPBar.log（Filza 直接翻，超 256KB 自动清空重记）。</string>
+			<string>默认开启。写入 /var/mobile/Library/Logs/PiPBar.log（Filza 直接翻，超 256KB 自动清空重记）。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
