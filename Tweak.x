@@ -131,7 +131,7 @@ static __weak UIView *gVideoHost = nil;
 // PiP 窗口边界 = 视频矩形，底条在窗口【外面】。窗口外的触摸根本不会派发给这个窗口，
 // 所以按钮画得再对也是「看得见点不到」。修法：按钮搬进一个独立的悬浮 UIWindow
 // （windowLevel = PiP 窗口 +1），只吃按钮触摸、其余穿透；位置由显示链每帧同步。
-static CGRect gLastStrip = (CGRect){0,0,0,0};   // 底条矩形（frame 画布坐标），layoutSubviews 维护
+static CGRect gLastStrip = (CGRect){{0,0},{0,0}};   // 底条矩形（frame 画布坐标），layoutSubviews 维护
 static BOOL gExpandedUI = NO;              // PiP 展开成大窗时把壳和按钮都收起来
 static UIWindow *gTouchWindow = nil;       // PIPBarTouchWindow，按钮宿主
 static CADisplayLink *gSyncLink = nil;     // 跟随 PiP 拖动/缩放的同步心跳（仅 PiP 存活期间）
