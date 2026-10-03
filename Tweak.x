@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.22"
+#define PIP_BUILD_TAG @"v0.23"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -331,6 +331,7 @@ static void pipApplyFreeMovePref(void) {
     gFreeMove = gFreePending;
     if (gFreePan != nil) gFreePan.enabled = gFreeMove;
     if (gFreePinch != nil) gFreePinch.enabled = gFreeMove;
+    if (gInstalledFrame != nil) gInstalledFrame.closeButton.hidden = !gFreeMove; // v0.23
     PIPLog(@"free-move %@（来自设置）", gFreeMove ? @"开" : @"关");
 }
 
@@ -345,6 +346,9 @@ static void pipApplyFreeMovePref(void) {
 @property (nonatomic, strong) UILabel *timeLabel;
 @property (nonatomic, strong) UIPanGestureRecognizer *seekPan;
 @property (nonatomic, strong) UITapGestureRecognizer *seekTap;
+// v0.23：自由态（解除吸附）专用关闭按钮 —— 自由态下整块视频被壳接管，
+// 原生控制条（播放/还原/关闭）点不到，故在外框右上角加一个关闭入口。
+@property (nonatomic, strong) UIButton *closeButton;
 // v0.11：外框矩形（本壳坐标系，含底部黑边）—— 供 pointInside 扩展命中区用
 @property (nonatomic, assign) CGRect hitRect;
 // v0.15：拖动中（此时进度由手指决定，不被心跳覆盖）
@@ -518,6 +522,20 @@ static void pipSwizzlePointInsideOn(Class cls) {
         gFreePinch.enabled = NO;
         gFreePinch.delegate = self;
         [self addGestureRecognizer:gFreePinch];
+
+        // v0.23：自由态关闭按钮（右上角）。默认隐藏，仅 gFreeMove 时显示。
+        self.closeButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        [self.closeButton setTitle:@"✕" forState:UIControlStateNormal];
+        self.closeButton.titleLabel.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightMedium];
+        [self.closeButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        self.closeButton.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
+        self.closeButton.layer.cornerRadius = 18.0;
+        self.closeButton.clipsToBounds = YES;
+        self.closeButton.hidden = YES;   // 仅自由态显示
+        [self.closeButton addTarget:self action:@selector(pipCloseAction:)
+                    forControlEvents:UIControlEventTouchUpInside];
+        [self addSubview:self.closeButton];
+
         // v0.16：三颗按钮已移除（切歌通道对短视频 App 无效，改用系统自带控制条）
         [self setNeedsLayout];
     }
@@ -601,12 +619,55 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
     gFreeMove = !gFreeMove;
     gFreePan.enabled = gFreeMove;
     gFreePinch.enabled = gFreeMove;
+    self.closeButton.hidden = !gFreeMove;   // v0.23：仅自由态显示关闭按钮
     // 自由态需要能接到拖动 ⇒ hitTest 必须放行视频区
     self.userInteractionEnabled = YES;
     [self setNeedsLayout];
     [gInstalledFrame setNeedsLayout];
     PIPLog(@"free-move %@（长按切换；%@）", gFreeMove ? @"开：可自由拖动/双指缩放" : @"关：交回系统吸附",
            gFreeMove ? @"再长按恢复吸附" : @"长按可随时解除吸附");
+}
+
+// v0.23：关闭按钮动作。自由态下原生控制条被壳挡住点不到，故这里直接关掉 PiP。
+- (void)pipCloseAction:(id)sender {
+    // 先退出自由态（顺手把原生控制条释放出来，万一 PiP 没关成功还能手动关）
+    gFreeMove = NO;
+    if (gFreePan != nil) gFreePan.enabled = NO;
+    if (gFreePinch != nil) gFreePinch.enabled = NO;
+    self.closeButton.hidden = YES;
+    [self setNeedsLayout];
+    PIPLog(@"close button tapped → 关闭画中画");
+    pipStopPiP();
+}
+
+// v0.23：关闭 PiP —— 多候选 selector 降级，覆盖 iOS 版本差异。
+// SBPIPController（SpringBoard 私有的 PiP 服务）与 contentVC 上逐个尝试，
+// 第一个 respondsToSelector 的就调用；都不认则只打日志，不崩。
+static void pipStopPiP(void) {
+    NSArray *sels = @[@"invalidatePictureInPicture",
+                     @"stopPictureInPicture",
+                     @"_stopPictureInPicture",
+                     @"_dismissPictureInPicture",
+                     @"cancelPictureInPicture",
+                     @"dismissPictureInPicture"];
+    NSMutableArray *objs = [NSMutableArray array];
+    Class ctl = objc_getClass("SBPIPController");
+    if (ctl != nil && [ctl respondsToSelector:@selector(sharedInstance)]) {
+        id inst = [ctl performSelector:@selector(sharedInstance)];
+        if (inst != nil) [objs addObject:inst];
+    }
+    if (gContentVC != nil) [objs addObject:gContentVC];
+    for (id o in objs) {
+        for (NSString *name in sels) {
+            SEL s = NSSelectorFromString(name);
+            if ([o respondsToSelector:s]) {
+                [o performSelector:s];
+                PIPLog(@"close PiP via [%@ %@]", NSStringFromClass([o class]), name);
+                return;
+            }
+        }
+    }
+    PIPLog(@"close PiP：候选 selector 均未响应（iOS 版本漂移？）");
 }
 
 // 自由态拖动：把位移量累加到 PiP content view 的 transform 上。
@@ -772,6 +833,15 @@ static NSString *pipTimeText(double sec) {
         if (h != nil) { host = h; gVideoHost = h; }
     }
     if (sup == nil || host == nil || host.window == nil) return;
+
+    // v0.23：自由态关闭按钮 — 钉在视频右上角（外框内）。视频矩形刚算好，布局跟随。
+    if (self.closeButton != nil && !self.closeButton.hidden) {
+        CGFloat bs = 36.0;
+        self.closeButton.frame = CGRectMake(CGRectGetMaxX(vr) - bs - 8.0,
+                                            CGRectGetMinY(vr) + 8.0, bs, bs);
+        [self bringSubviewToFront:self.closeButton];
+    }
+
 
     // 视频矩形换算到本画布坐标 —— 壳就是绕着它向外扩的
     CGRect vr = [host convertRect:host.bounds toView:self];
