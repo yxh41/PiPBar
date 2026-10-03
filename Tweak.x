@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.11"
+#define PIP_BUILD_TAG @"v0.12"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -138,18 +138,29 @@ static void *gMRLib = NULL;                                   // NULL=未试；-
 static Boolean (*gMRSendCommand)(int, id) = NULL;
 static void (*gMRGetNowPlayingInfo)(dispatch_queue_t, void (^)(CFDictionaryRef)) = NULL;
 static void (*gMRKeepAlive)(void) = NULL;
+static void (*gMRGetAppPID)(dispatch_queue_t, void (^)(int)) = NULL;
 
-// 能力判据（注意：MediaRemote **没有**暴露 SupportsNextTrack 键，只能靠下列信号推断）
+// 能力判据
 static BOOL gMRIsMusicApp = NO;      // kMRMediaRemoteNowPlayingInfoIsMusicApp
 static BOOL gMRHasPlaylist = NO;     // TotalTrackCount > 1
 static BOOL gMRProhibitsSkip = NO;   // kMRMediaRemoteNowPlayingInfoProhibitsSkip（DRM 禁止跳）
 static NSString *gMRTitle = nil;
+static NSString *gMRUniqueID = nil; // 用于切歌后校验是否真的换了条目
+static int gMRAppPID = 0;            // MediaRemote 当前 NowPlaying 客户端的 pid（>0 = 系统认得这个 App）
 static double gMRQueryAt = 0;
+static NSString *gMRLastKeys = nil;  // 上次打印的 now playing 键集（变化时才打日志）
+
+// v0.12：切歌「试探 → 校验 → 回退」状态机
+static BOOL gTrackPending = NO;      // 已发切歌命令，等待校验
+static double gTrackSentAt = 0;
+static NSString *gTrackTitleSnapshot = nil;   // 发出时的条目标题（校验用）
+static BOOL gTrackForward = YES;
 
 static NSString *const kMRKeyIsMusicApp   = @"kMRMediaRemoteNowPlayingInfoIsMusicApp";
 static NSString *const kMRKeyTotalTracks  = @"kMRMediaRemoteNowPlayingInfoTotalTrackCount";
 static NSString *const kMRKeyProhibitsSkip = @"kMRMediaRemoteNowPlayingInfoProhibitsSkip";
 static NSString *const kMRKeyTitle        = @"kMRMediaRemoteNowPlayingInfoTitle";
+static NSString *const kMRKeyUniqueID     = @"kMRMediaRemoteNowPlayingInfoUniqueIdentifier";
 
 static void pipEnsureMediaRemote(void) {
     if (gMRLib != NULL) return;   // 已加载或已标记失败
@@ -168,8 +179,10 @@ static void pipEnsureMediaRemote(void) {
     // 所以不能依赖它：探测不到就探测不到，改由「强制切歌」档让用户自行验证 App 是否支持。
     gMRKeepAlive = (void (*)(void))dlsym(gMRLib, "MRMediaRemoteKeepAlive");
     if (gMRKeepAlive != NULL) gMRKeepAlive();
-    PIPLog(@"MR loaded: send=%p getInfo=%p keepAlive=%p（keepAlive=0x0 属 iOS 16 正常，不影响发命令）",
-           (void *)gMRSendCommand, (void *)gMRGetNowPlayingInfo, (void *)gMRKeepAlive);
+    gMRGetAppPID = (void (*)(dispatch_queue_t, void (^)(int)))dlsym(gMRLib, "MRMediaRemoteGetNowPlayingApplicationPID");
+    PIPLog(@"MR loaded: send=%p getInfo=%p keepAlive=%p getPID=%p（keepAlive=0x0 属 iOS 16 正常，不影响发命令）",
+           (void *)gMRSendCommand, (void *)gMRGetNowPlayingInfo,
+           (void *)gMRKeepAlive, (void *)gMRGetAppPID);
 }
 
 // 拉一次 NowPlaying 信息（异步；只取需要的几个标量，不持有 CFDictionary ⇒ 无所有权坑）
@@ -178,38 +191,86 @@ static void pipMRRefresh(void) {
     double now = [[NSDate date] timeIntervalSinceReferenceDate];
     if (now - gMRQueryAt < 2.0) return;   // 2 秒一次足够，拖动时也别刷爆 mediaserverd
     gMRQueryAt = now;
+
+    if (gMRGetAppPID != NULL) {
+        gMRGetAppPID(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^(int pid) {
+            dispatch_async(dispatch_get_main_queue(), ^{ gMRAppPID = pid; });
+        });
+    }
+
     gMRGetNowPlayingInfo(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
                          ^(CFDictionaryRef info) {
         BOOL music = NO, hasList = NO, prohibit = NO;
-        NSString *title = nil;
+        NSString *title = nil, *uid = nil;
+        NSString *keys = nil;
         if (info != NULL) {
             NSDictionary *d = (__bridge NSDictionary *)info;
             music    = [d[kMRKeyIsMusicApp] boolValue];
             hasList  = [d[kMRKeyTotalTracks] doubleValue] > 1.0;
             prohibit = [d[kMRKeyProhibitsSkip] boolValue];
             title    = d[kMRKeyTitle];
+            uid      = d[kMRKeyUniqueID];
+            keys     = [d.allKeys componentsJoinedByString:@","];
         }
+        NSString *kt = keys, *ti = title, *ui = uid;   // block 捕获（ARC 强引用）
         dispatch_async(dispatch_get_main_queue(), ^{
             gMRIsMusicApp = music; gMRHasPlaylist = hasList;
-            gMRProhibitsSkip = prohibit; gMRTitle = title;
+            gMRProhibitsSkip = prohibit; gMRTitle = ti; gMRUniqueID = ui;
+            // v0.12：首次拿到（或变化时）打印原始键集 + pid —— 用来判定
+            // 「MediaRemote 到底看不看得见这个 App」这个根本问题
+            if (![kt isEqualToString:(gMRLastKeys ?: @"")]) {
+                gMRLastKeys = kt;
+                PIPLog(@"MR info: pid=%d music=%d list=%d prohibit=%d title=%@ uid=%@ keys={%@}",
+                       gMRAppPID, music, hasList, prohibit, ti ?: @"-", ui ?: @"-", kt ?: @"(空)");
+            }
         });
     });
 }
 
-// 能否切歌：媒体类 App（音乐/播客）或存在播放列表（>1 首）才发 next/prev，
-// 否则普通网页视频只有单条内容，发了也没用 —— 直接回退 ±10s 快退快进。
+// 能否试切歌：MediaRemote 没有 SupportsNextTrack 能力键，判据从宽——
+// 只要 mediaserverd 认得当前 NowPlaying 客户端（pid>0）或它报了音乐/播放列表，就值得一试。
 static BOOL pipMRCanTrackSkip(void) {
-    return gMRIsMusicApp || gMRHasPlaylist;
+    return gMRAppPID > 0 || gMRIsMusicApp || gMRHasPlaylist;
 }
 
-// 返回 YES 表示已用切歌通道发出；NO 表示应回退 Pegasus ±10s
-// gButtonAction: 0=自动(探测) 1=强制切歌(不回退) 2=始终 ±10s
+// 发切歌命令并进入「等待校验」状态；返回 YES 表示已尝试（后续由 tick 校验/回退）
 static BOOL pipSendTrackSkip(BOOL forward) {
     if (gMRSendCommand == NULL) return NO;
-    if (gButtonAction == 2) return NO;                 // 始终 ±10s
-    if (gButtonAction == 0 && !pipMRCanTrackSkip()) return NO;   // 自动：探测不到就回退
-    // kMRNextTrack = 4 / kMRPreviousTrack = 5（userInfo 传 nil）
-    return gMRSendCommand(forward ? 4 : 5, nil) ? YES : NO;
+    if (gButtonAction == 2) return NO;                                   // 档位=始终 ±10s
+    if (gButtonAction == 0 && !pipMRCanTrackSkip()) return NO;          // 档位=自动且探测不到
+    BOOL sent = gMRSendCommand(forward ? 4 : 5, nil);
+    if (sent) {
+        gTrackPending = YES;
+        gTrackForward = forward;
+        gTrackSentAt = [[NSDate date] timeIntervalSinceReferenceDate];
+        gTrackTitleSnapshot = [gMRTitle copy] ?: @"";
+    }
+    return sent;
+}
+
+// v0.12 校验：发了切歌命令后等 1.5 秒，若条目标题没变 ⇒ App 没接这个命令，
+// 自动补发 Pegasus ±10s 快退快进（用户无需手动切档位）。
+static void pipVerifyTrackSkip(void) {
+    if (!gTrackPending) return;
+    double now = [[NSDate date] timeIntervalSinceReferenceDate];
+    if (now - gTrackSentAt < 1.5) return;
+    gTrackPending = NO;
+    NSString *cur = gMRTitle ?: @"";
+    if ([cur isEqualToString:(gTrackTitleSnapshot ?: @"")]) {
+        PIPLog(@"track 校验失败：1.5s 内条目未变（title=%@ uid=%@）⇒ App 未实现 nextTrack/previousTrack，"
+               @"自动回退 ±10s", cur, gMRUniqueID ?: @"-");
+        Class cmdCls = objc_getClass("PGCommand");
+        SEL mk = sel_registerName("commandForPlaybackAction:associatedDoubleValue:");
+        PGPictureInPictureViewController *c = (PGPictureInPictureViewController *)gContentVC;
+        if (cmdCls != nil && c != nil && [cmdCls respondsToSelector:mk]) {
+            double off = gTrackForward ? 10.0 : -10.0;
+            id (*build)(id, SEL, long long, double) =
+                (id (*)(id, SEL, long long, double))objc_msgSend;
+            [c handleCommand:build(cmdCls, mk, 1LL, off)];
+        }
+    } else {
+        PIPLog(@"track 校验成功：条目已切换（%@ → %@）", gTrackTitleSnapshot, cur);
+    }
 }
 
 #pragma mark - 外框 + 按钮条
@@ -565,6 +626,7 @@ static UIImage *pipIcon(BOOL playing) {
     // v0.10：切歌能力探测（2 秒节流，内部已限频；只是读 mediaserverd 的 now playing 标量）
     pipEnsureMediaRemote();
     pipMRRefresh();
+    pipVerifyTrackSkip();   // v0.12：切歌后 1.5s 校验，没换条目就自动补 ±10s
 
     // v0.11：装壳时若还没进窗口（canvas.window == nil），这里补 swizzle PiP 窗口
     if (gExtendHit && gInstalledFrame != nil) {
@@ -816,9 +878,8 @@ static void pipInitPegasusOnce(void);
                 //    Pegasus 的 ±10s 快退/快进（commandForPlaybackAction:associatedDoubleValue:）。
                 BOOL forward = (tag == 3);
                 if (pipSendTrackSkip(forward)) {
-                    PIPLog(@"track -> %@（MediaRemote 切歌通道，title=%@ music=%d list=%d）",
-                           forward ? @"kMRNextTrack" : @"kMRPreviousTrack",
-                           gMRTitle ?: @"-", gMRIsMusicApp, gMRHasPlaylist);
+                    PIPLog(@"track -> %@（已发 MediaRemote 切歌，pid=%d，1.5s 后自动校验）",
+                           forward ? @"kMRNextTrack" : @"kMRPreviousTrack", gMRAppPID);
                 } else {
                     Class cmdCls = objc_getClass("PGCommand");
                     SEL mk = sel_registerName("commandForPlaybackAction:associatedDoubleValue:");
