@@ -23,6 +23,7 @@
 
 @interface PSListController (PIPSetPrefForward)
 - (void)setPreferenceValue:(id)value forSpecifier:(PSSpecifier *)specifier;
+- (UITableViewCell *)cellForSpecifier:(PSSpecifier *)specifier;
 - (UITableView *)tableView;
 @end
 
