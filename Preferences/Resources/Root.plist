@@ -98,17 +98,17 @@
 			<key>label</key>
 			<string>外框宽度</string>
 			<key>min</key>
-			<real>4</real>
+			<real>0</real>
 			<key>max</key>
 			<real>24</real>
 			<key>minValueText</key>
-			<string>4</string>
+			<string>0</string>
 			<key>maxValueText</key>
 			<string>24</string>
 			<key>default</key>
 			<real>8</real>
 			<key>footnote</key>
-			<string>视频顶部与左右两侧黑边的厚度。</string>
+			<string>视频顶部与左右两侧黑边的厚度，0 = 不显示边框。</string>
 		</dict>
 		<dict>
 			<key>cell</key>

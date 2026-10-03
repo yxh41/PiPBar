@@ -34,7 +34,7 @@
 static const void *kPiPSliderBoundKey = &kPiPSliderBoundKey;   // 已挂 target 标记
 static const void *kPiPSliderPrefKey  = &kPiPSliderPrefKey;    // 属于哪个偏好项
 static const void *kPiPSliderCellKey  = &kPiPSliderCellKey;    // 记住所属 cell（弱）
-static const void *kPiPHintLabelKey   = &kPiPHintLabelKey;     // 滑块右侧说明小字
+static const void *kPiPValueLabelKey  = &kPiPValueLabelKey;    // 滑块最右侧当前值标签
 
 // 设置面板自己的文件日志（独立文件，方便与 tweak 日志一起回传）
 // v0.14：加 256KB 上限自动清空重记 —— 上一版因判重失效被刷到 3.4MB。
@@ -99,11 +99,6 @@ static void pipPrefsLogImpl(NSString *line) {
 
 #pragma mark - 滑块：扫描表格 + 认领 + 即时标题
 
-- (NSString *)pipBaseNameForKey:(NSString *)key {
-    if ([key isEqualToString:@"FrameWidth"]) return @"外框宽度（顶/左右）";
-    if ([key isEqualToString:@"BarHeight"])  return @"底部高度（黑边）";
-    return nil;
-}
 
 // 递归收集所有 UITableViewCell
 - (void)pipCollectCells:(UIView *)root into:(NSMutableArray *)out {
@@ -182,7 +177,7 @@ static void pipPrefsLogImpl(NSString *line) {
 
         // 进页面先把当前值写进标题 + 建好右侧说明小字
         [self pipUpdateTitleForSlider:sl key:key value:sl.value];
-        [self pipLayoutHintLabel:[self pipEnsureHintLabelForCell:cell] inCell:cell];
+        [self pipLayoutValueLabel:[self pipEnsureValueLabelForCell:cell] inCell:cell];
         pipPrefsLog(@"bind: %@ 滑块已挂 target（min=%.0f max=%.0f value=%.0f）",
                     key, (double)sl.minimumValue, (double)sl.maximumValue, (double)sl.value);
     }
@@ -201,62 +196,65 @@ static void pipPrefsLogImpl(NSString *line) {
     pipPrefsLog(@"bind: 扫描到 cell=%d，本轮新绑定=%d", (int)cells.count, bound);
 }
 
-// 数值显示：直接改【滑块所在 cell 自己的】标题文字 —— 与滑块同一行、跟手即时。
-// v0.17：按用户要求，把「说明文案」缩小后挪到【同一行右侧】（不再用 cell 下方的
-// footnote 长段文字），并把「当前值」放在标题里。左标题 + 右侧小字，两行合一。
+// 数值显示：直接改【滑块所在 cell 自己的】标题文字。
+// v0.18：按用户要求 —— 标题只留名称（不再拼「：N pt」），**当前值单独显示在最右侧**，
+// 这样文字绝不压到滑块上（此前标题过长 + 右上角说明小字双重遮挡滑块）。
 - (void)pipUpdateTitleForSlider:(UISlider *)sl key:(NSString *)key value:(CGFloat)f {
     NSString *base = [self pipBaseNameForKey:key];
     if (base == nil) return;
     UITableViewCell *cell = objc_getAssociatedObject(sl, kPiPSliderCellKey);
     NSString *txt = [NSString stringWithFormat:@"%@：%.0f pt", base, f];
-    if (cell != nil && ![cell.textLabel.text isEqualToString:txt]) {
-        cell.textLabel.text = txt;
-        [cell setNeedsLayout];
-    }
-    // 右侧说明小字：重新取一次并更新
-    UILabel *hint = [self pipEnsureHintLabelForCell:cell];
-    if (hint != nil) {
-        NSString *h = [self pipHintTextForKey:key];
-        if (![hint.text isEqualToString:h]) {
-            hint.text = h;
-            [self pipLayoutHintLabel:hint inCell:cell];
+
+    if (cell != nil) {
+        // 标题只留名称，绝不与滑块重叠
+        if (![cell.textLabel.text isEqualToString:base]) {
+            cell.textLabel.text = base;
         }
+        // 当前值放在最右侧独立标签
+        UILabel *val = [self pipEnsureValueLabelForCell:cell];
+        NSString *vt = [NSString stringWithFormat:@"%.0f pt", f];
+        if (![val.text isEqualToString:vt]) {
+            val.text = vt;
+        }
+        [self pipLayoutValueLabel:val inCell:cell];
     }
-    // 同步 specifier 名字，重进页面时也带着数值
+    // 同步 specifier 名字（重进页面时标题仍显示数值更友好）
     for (PSSpecifier *spec in _specifiers) {
         if ([[spec propertyForKey:@"key"] isEqualToString:key]) { spec.name = txt; break; }
     }
 }
 
-// 滑块右侧的说明小字（单位/范围），v0.17 新增
-- (NSString *)pipHintTextForKey:(NSString *)key {
-    if ([key isEqualToString:@"FrameWidth"]) return @"顶/左右两侧 · 4–24pt";
-    if ([key isEqualToString:@"BarHeight"])  return @"底部黑边 · 28–80pt";
+- (NSString *)pipBaseNameForKey:(NSString *)key {
+    if ([key isEqualToString:@"FrameWidth"]) return @"外框宽度";
+    if ([key isEqualToString:@"BarHeight"])  return @"底部高度";
     return nil;
 }
 
-- (UILabel *)pipEnsureHintLabelForCell:(UITableViewCell *)cell {
+// 滑块最右侧的当前值标签（v0.18 取代 v0.17 的说明小字）
+- (UILabel *)pipEnsureValueLabelForCell:(UITableViewCell *)cell {
     if (cell == nil) return nil;
-    UILabel *hint = objc_getAssociatedObject(cell, kPiPHintLabelKey);
-    if (hint == nil) {
-        hint = [[UILabel alloc] initWithFrame:CGRectZero];
-        hint.font = [UIFont systemFontOfSize:10.0];
-        hint.textColor = [UIColor grayColor];
-        hint.textAlignment = NSTextAlignmentRight;
-        hint.userInteractionEnabled = NO;    // 不吃触摸
-        [cell.contentView addSubview:hint];
-        objc_setAssociatedObject(cell, kPiPHintLabelKey, hint, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UILabel *val = objc_getAssociatedObject(cell, kPiPValueLabelKey);
+    if (val == nil) {
+        val = [[UILabel alloc] initWithFrame:CGRectZero];
+        val.font = [UIFont monospacedDigitSystemFontOfSize:14.0 weight:UIFontWeightSemibold];
+        val.textColor = [UIColor labelColor];
+        val.textAlignment = NSTextAlignmentRight;
+        val.userInteractionEnabled = NO;    // 不吃触摸，避免挡滑块
+        [cell.contentView addSubview:val];
+        objc_setAssociatedObject(cell, kPiPValueLabelKey, val, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    return hint;
+    return val;
 }
 
-// 右上角定位：在标题行右侧、避开文字（用 cell 宽度的一半点右对齐）
-- (void)pipLayoutHintLabel:(UILabel *)hint inCell:(UITableViewCell *)cell {
-    if (hint == nil || cell == nil) return;
-    [hint sizeToFit];
+// 右对齐到 cell 右缘（留 12pt 边距），垂直居中
+- (void)pipLayoutValueLabel:(UILabel *)val inCell:(UITableViewCell *)cell {
+    if (val == nil || cell == nil) return;
+    [val sizeToFit];
     CGFloat w = CGRectGetWidth(cell.contentView.bounds);
-    CGFloat h = CGRectGetHeight(hint.bounds);
-    hint.frame = CGRectMake(MAX(80.0, w * 0.52), 5.0, MAX(60.0, w * 0.46), h > 0 ? h : 13.0);
+    CGFloat h = CGRectGetHeight(val.bounds);
+    CGFloat vh = CGRectGetHeight(cell.contentView.bounds);
+    CGFloat tw = MAX(h, 44.0);
+    val.frame = CGRectMake(w - tw - 12.0, (vh - MAX(h, 16.0)) / 2.0, tw, MAX(h, 16.0));
 }
 
 - (void)pipSliderChanged:(UISlider *)sender {
@@ -296,6 +294,25 @@ static void pipPrefsLogImpl(NSString *line) {
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     [self pipBindSliders];
+    // v0.18：cell 布局完成后数值标签要按最终宽度右对齐
+    [self pipRelayoutValueLabels];
+}
+
+// v0.18：cell 宽度在 layoutSubviews 后才最终确定 ⇒ 重新定位所有数值标签
+- (void)pipRelayoutValueLabels {
+    if (_specifiers == nil) return;
+    for (PSSpecifier *spec in _specifiers) {
+        NSString *key = [spec propertyForKey:@"key"];
+        if (![self pipIsSliderKey:key]) continue;
+        UITableViewCell *cell = nil;
+        @try { cell = [self cellForSpecifier:spec]; } @catch (NSException *e) { cell = nil; }
+        UILabel *val = objc_getAssociatedObject(cell, kPiPValueLabelKey);
+        [self pipLayoutValueLabel:val inCell:cell];
+    }
+}
+
+- (BOOL)pipIsSliderKey:(NSString *)key {
+    return [key isEqualToString:@"FrameWidth"] || [key isEqualToString:@"BarHeight"];
 }
 
 - (void)viewDidLayoutSubviews {

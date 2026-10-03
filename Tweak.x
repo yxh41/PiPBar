@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.16"
+#define PIP_BUILD_TAG @"v0.17"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -118,6 +118,9 @@ static void pipFileWrite(NSString *line) {
 @interface PGCommand : NSObject
 - (long long)playbackAction;
 - (NSDictionary *)dictionaryRepresentation;
+@end
+
+@interface SBPIPInteractionController : NSObject
 @end
 
 @interface PGPictureInPictureViewController : UIViewController
@@ -301,6 +304,24 @@ static BOOL gFreeMove = NO;          // NO=系统吸附（默认） YES=自由�
 static UIPanGestureRecognizer *gFreePan = nil;
 static UIPinchGestureRecognizer *gFreePinch = nil;
 static UILongPressGestureRecognizer *gFreeLongPress = nil;
+
+// v0.17：系统 pan 手势是否要被我们吞掉。
+// 根因（v0.16 真机反馈「拖进度条时画中画跟着动」）：v0.11 扩展了 hitRect 让窗口在
+// 黑边区域可命中，而**挂在窗口/交互控制器上的 pan 手势同样会收到投递到子视图的触摸**
+// ⇒ 我们在进度条上拖动时，系统仍在拖窗口。FreePIP 解决同一问题的办法就是 hook 掉
+// handlePanGesture:（仅在需要时放行 %orig）。
+static BOOL pipShouldBlockSystemPan(void) {
+    if (gSeekBusy) return YES;   // 正在拖进度条 ⇒ 绝不能让系统拖窗口
+    if (gFreeMove) return YES;   // 自由态由我们自己的 pan 负责
+    return NO;
+}
+
+// 自由态的变换目标：必须是 PiP content view（PGHitTestExtendableView）而不是内层
+// PGLayerHostView —— 内层由 Auto Layout 驱动、每帧重置，transform 写了也没用。
+static UIView *pipFreeTransformTarget(void) {
+    UIViewController *c = gContentVC;
+    return c != nil ? c.view : nil;
+}
 
 // 消费暂存的 FreeMove 偏好（必须在 gFreeMove 声明之后调用）
 static void pipApplyFreeMovePref(void) {
@@ -545,19 +566,21 @@ static void pipSwizzlePointInsideOn(Class cls) {
            gFreeMove ? @"再长按恢复吸附" : @"长按可随时解除吸附");
 }
 
-// 自由态拖动：把位移量累加到宿主视图的 transform 上（FreePIP 同思路）
+// 自由态拖动：把位移量累加到 PiP content view 的 transform 上。
+// ⚠️ v0.17 修正：v0.16 加在内层 gVideoHost(PGLayerHostView) 上完全无效 ——
+// 该层由 Auto Layout 驱动、每帧被重置，transform 写了立刻被抹掉（用户反馈「长按无效」）。
+// FreePIP 的原始做法正是加在 pictureInPictureViewController.view 这一层。
 - (void)pipFreePan:(UIPanGestureRecognizer *)gr {
-    UIView *target = gVideoHost;
+    UIView *target = pipFreeTransformTarget();
     if (!gFreeMove || target == nil) return;
     CGPoint t = [gr translationInView:target.superview];
     [gr setTranslation:CGPointZero inView:target.superview];
-    CGAffineTransform tf = target.transform;
-    target.transform = CGAffineTransformTranslate(tf, t.x, t.y);
+    target.transform = CGAffineTransformTranslate(target.transform, t.x, t.y);
 }
 
-// 自由态缩放：以视频宿主自身中心缩放（限制 0.5x ~ 2.5x，避免缩到看不见）
+// 自由态缩放：以 PiP content view 自身中心缩放（clamp 0.5x ~ 2.5x，避免缩到看不见）
 - (void)pipFreePinch:(UIPinchGestureRecognizer *)gr {
-    UIView *target = gVideoHost;
+    UIView *target = pipFreeTransformTarget();
     if (!gFreeMove || target == nil) return;
     CGFloat s = gr.scale;
     gr.scale = 1.0;
@@ -983,7 +1006,26 @@ static void pipDarwinCallback(CFNotificationCenterRef center, void *observer,
 // 一旦 ctor 时它还没进内存，整组 %init 会一起落空（SBPIP 也跟着不生效）。
 static void pipInitPegasusOnce(void);
 
+// iOS 14+ 的 PiP 拖动入口在 SBPIPInteractionController（FreePIP 也是 hook 这两个地方）
+%hook SBPIPInteractionController
+
+- (void)handlePanGesture:(UIPanGestureRecognizer *)sender {
+    if (pipShouldBlockSystemPan()) { PIPLog(@"system pan blocked (drag/seek)"); return; }
+    %orig;
+}
+
+@end
+
 %hook SBPIPContainerViewController
+
+// v0.17：吞掉系统的 PiP 拖动 pan。
+// 背景：v0.11 扩展 hitRect 让窗口在底部黑边「可命中」后，挂在交互控制器上的 pan
+// 手势会连同子视图（我们的壳）上的触摸一起收到 ⇒ 拖进度条时画中画跟着跑。
+// FreePIP（sohsatoh）解决同一问题的做法就是在这里 %orig 前加条件放行。
+- (void)_handlePanGesture:(UIPanGestureRecognizer *)sender {
+    if (pipShouldBlockSystemPan()) { PIPLog(@"system pan blocked (drag/seek)"); return; }
+    %orig;
+}
 
 - (void)loadView {
     %orig;
