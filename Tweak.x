@@ -310,6 +310,9 @@ static void pipMRRefresh(void) {
 @property (nonatomic, assign) CGRect trackRect;
 - (void)pipSelfHeal;
 - (void)pipRefreshProgress;
+// v0.26：必须在 @interface 里声明 —— pipApplyFreeMovePref 是文件级静态函数，
+// 位于 @implementation 之前，只认 @interface 里声明过的 selector
+- (void)pipLayoutCloseButton;
 @end
 
 @class PIPFrameView;   // 前置声明：下面的文件级静态指针在 @interface 之前，需先告诉编译器类型
