@@ -1014,7 +1014,7 @@ static void pipInitPegasusOnce(void);
     %orig;
 }
 
-@end
+%end
 
 %hook SBPIPContainerViewController
 
@@ -1150,7 +1150,8 @@ static void pipInitPegasusOnce(void);
                 BOOL nowPlaying = [rate doubleValue] > 0.0;
                 if (nowPlaying != gPlaying) {
                     gPlaying = nowPlaying;
-                    [gInstalledFrame setNeedsLayout];   // 同步 play/pause 图标
+                    // v0.17：按钮已移除，播放状态变化时不再需要刷新图标；
+                    // 仅保留状态本身（供未来可能的 UI 使用）
                 }
                 PIPLog(@"STATE diff=%@", d);
             }
