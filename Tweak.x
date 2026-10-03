@@ -30,8 +30,9 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.9"
+#define PIP_BUILD_TAG @"v0.10"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -43,6 +44,7 @@ static BOOL gFileLog = YES;       // 默认开：日志是排障生命线，别�
 static BOOL gDebugLog = NO;
 static CGFloat gFrameW = 8.0;     // 顶/左右边框宽（用户反馈 12 太粗 → 默认 8）
 static CGFloat gBarH = 40.0;      // 底部控制条高
+static BOOL gPreferTrackSkip = YES;  // 左右键优先切歌（MediaRemote），App 不支持时自动回退 ±10s
 
 // roothide per-app 容器隔离：Settings 里 CFPreferences 写的域，SpringBoard 读不到
 // （MapAdKiller/Oback 双双踩实）。范式同款：全局 plist 文件直读，两个进程命中同一物理文件。
@@ -61,6 +63,7 @@ static void pipReadPrefs(void) {
     if ((v = pipPref(@"ShowButtons")) != nil) gShowButtons = [v boolValue];
     if ((v = pipPref(@"FileLog")) != nil) gFileLog = [v boolValue];
     if ((v = pipPref(@"DebugLog")) != nil) gDebugLog = [v boolValue];
+    if ((v = pipPref(@"PreferTrackSkip")) != nil) gPreferTrackSkip = [v boolValue];
     if ((v = pipPref(@"FrameWidth")) != nil) {
         CGFloat f = [v floatValue];
         if (f >= 2.0 && f <= 30.0) gFrameW = f;
@@ -119,6 +122,90 @@ static void pipFileWrite(NSString *line) {
 @end
 
 static BOOL gPlaying = YES;   // 最近一次已知的播放状态
+
+#pragma mark - MediaRemote 切歌通道（kMRNextTrack / kMRPreviousTrack）
+
+// 为什么需要它：系统画中画（Pegasus）只提供 skipByInterval / skipToLive / skipPreroll，
+// 30 个命令工厂里**没有 track/next/previous**（真机 PGCMD-META 实锤）——所以画中画自己
+// 切不了歌。但锁屏的「上/下一曲」按钮走的是 mediaserverd 的 MediaRemote 通道，
+// 那里有 kMRNextTrack(4) / kMRPreviousTrack(5)，由系统路由到 App 的
+// MPRemoteCommandCenter nextTrack/previousTrack handler —— 走这条能真正切歌。
+// 私有框架运行时 dlopen + dlsym 取函数指针（不链接符号，跨版本安全）。
+// 常量出处：Cykey/ios-reversed-headers · MediaRemote/MediaRemote.h
+static void *gMRLib = NULL;                                   // NULL=未试；-1=试过失败
+static Boolean (*gMRSendCommand)(int, id) = NULL;
+static void (*gMRGetNowPlayingInfo)(dispatch_queue_t, void (^)(CFDictionaryRef)) = NULL;
+static void (*gMRKeepAlive)(void) = NULL;
+
+// 能力判据（注意：MediaRemote **没有**暴露 SupportsNextTrack 键，只能靠下列信号推断）
+static BOOL gMRIsMusicApp = NO;      // kMRMediaRemoteNowPlayingInfoIsMusicApp
+static BOOL gMRHasPlaylist = NO;     // TotalTrackCount > 1
+static BOOL gMRProhibitsSkip = NO;   // kMRMediaRemoteNowPlayingInfoProhibitsSkip（DRM 禁止跳）
+static NSString *gMRTitle = nil;
+static double gMRQueryAt = 0;
+
+static NSString *const kMRKeyIsMusicApp   = @"kMRMediaRemoteNowPlayingInfoIsMusicApp";
+static NSString *const kMRKeyTotalTracks  = @"kMRMediaRemoteNowPlayingInfoTotalTrackCount";
+static NSString *const kMRKeyProhibitsSkip = @"kMRMediaRemoteNowPlayingInfoProhibitsSkip";
+static NSString *const kMRKeyTitle        = @"kMRMediaRemoteNowPlayingInfoTitle";
+
+static void pipEnsureMediaRemote(void) {
+    if (gMRLib != NULL) return;   // 已加载或已标记失败
+    gMRLib = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote",
+                    RTLD_LAZY);
+    if (gMRLib == NULL) {
+        PIPLog(@"MR dlopen 失败: %s", dlerror() ?: "(null)");
+        gMRLib = (void *)-1;       // 标记失败，不再重试
+        return;
+    }
+    gMRSendCommand =
+        (Boolean (*)(int, id))dlsym(gMRLib, "MRMediaRemoteSendCommand");
+    gMRGetNowPlayingInfo =
+        (void (*)(dispatch_queue_t, void (^)(CFDictionaryRef)))dlsym(gMRLib, "MRMediaRemoteGetNowPlayingInfo");
+    gMRKeepAlive = (void (*)(void))dlsym(gMRLib, "MRMediaRemoteKeepAlive");
+    // KeepAlive：不调的话 now playing 回调可能不投递 ⇒ 能力探测永远判「不支持」而退回 ±10s
+    if (gMRKeepAlive != NULL) gMRKeepAlive();
+    PIPLog(@"MR loaded: send=%p getInfo=%p keepAlive=%p",
+           (void *)gMRSendCommand, (void *)gMRGetNowPlayingInfo, (void *)gMRKeepAlive);
+}
+
+// 拉一次 NowPlaying 信息（异步；只取需要的几个标量，不持有 CFDictionary ⇒ 无所有权坑）
+static void pipMRRefresh(void) {
+    if (gMRGetNowPlayingInfo == NULL) return;
+    double now = [[NSDate date] timeIntervalSinceReferenceDate];
+    if (now - gMRQueryAt < 2.0) return;   // 2 秒一次足够，拖动时也别刷爆 mediaserverd
+    gMRQueryAt = now;
+    gMRGetNowPlayingInfo(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
+                         ^(CFDictionaryRef info) {
+        BOOL music = NO, hasList = NO, prohibit = NO;
+        NSString *title = nil;
+        if (info != NULL) {
+            NSDictionary *d = (__bridge NSDictionary *)info;
+            music    = [d[kMRKeyIsMusicApp] boolValue];
+            hasList  = [d[kMRKeyTotalTracks] doubleValue] > 1.0;
+            prohibit = [d[kMRKeyProhibitsSkip] boolValue];
+            title    = d[kMRKeyTitle];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            gMRIsMusicApp = music; gMRHasPlaylist = hasList;
+            gMRProhibitsSkip = prohibit; gMRTitle = title;
+        });
+    });
+}
+
+// 能否切歌：媒体类 App（音乐/播客）或存在播放列表（>1 首）才发 next/prev，
+// 否则普通网页视频只有单条内容，发了也没用 —— 直接回退 ±10s 快退快进。
+static BOOL pipMRCanTrackSkip(void) {
+    return gMRIsMusicApp || gMRHasPlaylist;
+}
+
+// 返回 YES 表示已用切歌通道发出；NO 表示应回退 Pegasus ±10s
+static BOOL pipSendTrackSkip(BOOL forward) {
+    if (gMRSendCommand == NULL || !gPreferTrackSkip) return NO;
+    if (!pipMRCanTrackSkip()) return NO;
+    // kMRNextTrack = 4 / kMRPreviousTrack = 5（userInfo 传 nil）
+    return gMRSendCommand(forward ? 4 : 5, nil) ? YES : NO;
+}
 
 #pragma mark - 外框 + 按钮条
 
@@ -214,12 +301,11 @@ static UIImage *pipIcon(BOOL playing) {
         self.barLayer.masksToBounds = NO;
         [self.layer addSublayer:self.barLayer];
         // 三颗按钮：壳的子视图（壳实测渲染位置正确；按钮在窗口边界内 ⇒ 必然可点）
-        // v0.9：图标改 skip 语义 —— Pegasus 的 30 个命令工厂里只有 skipByInterval/
-        // skipToLive/skipPreroll，**没有 track/next/previous**（系统 AVKit PiP 同样
-        // 只有快退/快进/播放暂停），故左右键是 ±10s 快退快进，不是切歌。
-        [self pipAddButtonWithTag:1 icon:@"gobackward.10" fallback:@"◀◀"];
+        // v0.10：左右键恢复切歌语义（backward.end.fill / forward.end.fill）——
+        // 走 MediaRemote 切歌通道，App 不支持切歌时自动回退 ±10s 快退快进。
+        [self pipAddButtonWithTag:1 icon:@"backward.end.fill" fallback:@"◀◀"];
         [self pipAddButtonWithTag:2 icon:nil fallback:@"▶"];   // play/pause 图标 layoutSubviews 里按状态设
-        [self pipAddButtonWithTag:3 icon:@"goforward.10" fallback:@"▶▶"];
+        [self pipAddButtonWithTag:3 icon:@"forward.end.fill" fallback:@"▶▶"];
         [self setNeedsLayout];
     }
     return self;
@@ -392,6 +478,10 @@ static UIImage *pipIcon(BOOL playing) {
             }
         }
     }
+    // v0.10：切歌能力探测（2 秒节流，内部已限频；只是读 mediaserverd 的 now playing 标量）
+    pipEnsureMediaRemote();
+    pipMRRefresh();
+
     if (host == nil || host.window == nil) return;
     // 当前视频矩形（本画布坐标），与 layoutSubviews 算法完全一致
     CGRect vr = [host convertRect:host.bounds toView:f];
@@ -628,19 +718,32 @@ static void pipInitPegasusOnce(void);
                     PIPLog(@"PGCommand/commandForSetPlaying: 不可用（类没加载或选择子漂移）");
                 }
             } else {
-                // 上一曲(1) / 下一曲(3)：PGCMD-META 实锤构造器
-                // commandForPlaybackAction:associatedDoubleValue:，系统快退/快进 = action=1 + ±10 秒
-                Class cmdCls = objc_getClass("PGCommand");
-                SEL mk = sel_registerName("commandForPlaybackAction:associatedDoubleValue:");
-                if (cmdCls != nil && [cmdCls respondsToSelector:mk]) {
-                    double off = (tag == 1) ? -10.0 : 10.0;   // 上一曲=-10s，下一曲=+10s
-                    id (*build)(id, SEL, long long, double) =
-                        (id (*)(id, SEL, long long, double))objc_msgSend;
-                    id cmd = build(cmdCls, mk, 1LL, off);
-                    [(PGPictureInPictureViewController *)c handleCommand:cmd];
-                    PIPLog(@"skip -> action=1 offset=%.0f（快退/快进，非切歌：Pegasus 无 track 命令）", off);
+                // 上一个(1) / 下一个(3) —— v0.10 双通道：
+                // ① 优先 MediaRemote 切歌（kMRPreviousTrack=5 / kMRNextTrack=4）——
+                //    走 mediaserverd，系统路由到 App 的 MPRemoteCommandCenter，
+                //    这是唯一能真正「切上一个/下一个视频」的通道（画中画自己切不了）。
+                // ② App 不支持切歌（普通网页视频只有单条内容）时，自动回退
+                //    Pegasus 的 ±10s 快退/快进（commandForPlaybackAction:associatedDoubleValue:）。
+                BOOL forward = (tag == 3);
+                if (pipSendTrackSkip(forward)) {
+                    PIPLog(@"track -> %@（MediaRemote 切歌通道，title=%@ music=%d list=%d）",
+                           forward ? @"kMRNextTrack" : @"kMRPreviousTrack",
+                           gMRTitle ?: @"-", gMRIsMusicApp, gMRHasPlaylist);
                 } else {
-                    PIPLog(@"PGCommand/commandForPlaybackAction:associatedDoubleValue: 不可用");
+                    Class cmdCls = objc_getClass("PGCommand");
+                    SEL mk = sel_registerName("commandForPlaybackAction:associatedDoubleValue:");
+                    if (cmdCls != nil && [cmdCls respondsToSelector:mk]) {
+                        double off = forward ? 10.0 : -10.0;
+                        id (*build)(id, SEL, long long, double) =
+                            (id (*)(id, SEL, long long, double))objc_msgSend;
+                        id cmd = build(cmdCls, mk, 1LL, off);
+                        [(PGPictureInPictureViewController *)c handleCommand:cmd];
+                        PIPLog(@"skip -> action=1 offset=%.0f（回退快退/快进：该 App 无切歌能力"
+                               @" music=%d list=%d prohibit=%d）",
+                               off, gMRIsMusicApp, gMRHasPlaylist, gMRProhibitsSkip);
+                    } else {
+                        PIPLog(@"两条通道都不可用：MediaRemote 未加载且 PGCommand 工厂缺失");
+                    }
                 }
             }
         };

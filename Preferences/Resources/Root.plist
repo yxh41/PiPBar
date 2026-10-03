@@ -58,7 +58,21 @@
 			<key>default</key>
 			<true/>
 			<key>footnote</key>
-			<string>底部三颗：快退 10 秒 / 播放暂停 / 快进 10 秒。注意：系统画中画（AVKit + Pegasus）只提供快退快进与播放暂停，没有「上一个/下一个视频」的切歌命令，故左右键是 ±10s 而非切歌。</string>
+			<string>底部三颗：上一个 / 播放暂停 / 下一个。左右键走 MediaRemote 切歌通道（系统路由到 App 的 MPRemoteCommandCenter）；若当前 App 没有切歌能力（如普通网页视频只有单条内容），自动回退为 ±10 秒快退/快进。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>defaults</key>
+			<string>com.yxh41.pipbar</string>
+			<key>key</key>
+			<string>PreferTrackSkip</string>
+			<key>label</key>
+			<string>左右键优先切歌</string>
+			<key>default</key>
+			<true/>
+			<key>footnote</key>
+			<string>开启后左右键先尝试「上一个/下一个」（MediaRemote kMRPreviousTrack/kMRNextTrack），App 不支持时自动回退 ±10 秒快退快进；关闭则始终只做 ±10 秒快退快进。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
