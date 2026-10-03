@@ -52,13 +52,13 @@
 			<key>defaults</key>
 			<string>com.yxh41.pipbar</string>
 			<key>key</key>
-			<string>ShowButtons</string>
+			<string>ShowProgress</string>
 			<key>label</key>
-			<string>显示控制按钮</string>
+			<string>可拖动进度条</string>
 			<key>default</key>
 			<true/>
 			<key>footnote</key>
-			<string>底部三颗：上一个 / 播放暂停 / 下一个。左右键走 MediaRemote 切歌通道（系统路由到 App 的 MPRemoteCommandCenter）；若当前 App 没有切歌能力（如普通网页视频只有单条内容），自动回退为 ±10 秒快退/快进。</string>
+			<string>底部黑边上的进度条，按住可拖动定位（系统画中画不能拖进度）。拖动时显示时间。直播流无总时长时不显示。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -66,31 +66,13 @@
 			<key>defaults</key>
 			<string>com.yxh41.pipbar</string>
 			<key>key</key>
-			<string>ShowProgress</string>
+			<string>FreeMove</string>
 			<key>label</key>
-			<string>可拖动进度条</string>
+			<string>长按解除吸附</string>
 			<key>default</key>
 			<true/>
 			<key>footnote</key>
-			<string>底部黑边上沿的可拖动进度条（系统画中画不能拖进度）。按住拖动可定位播放位置，松手生效；拖动时显示当前时间。直播流无总时长时不显示。</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSegmentCell</string>
-			<key>key</key>
-			<string>ButtonAction</string>
-			<key>label</key>
-			<string>左右键行为</string>
-			<key>default</key>
-			<integer>0</integer>
-			<key>values</key>
-			<array>
-				<string>自动</string>
-				<string>强制切歌</string>
-				<string>±10秒</string>
-			</array>
-			<key>footnote</key>
-			<string>自动：仅当媒体源是「音乐 App 或有播放列表」时才发切歌命令（kMRNextTrack），否则直接做 ±10 秒快退快进。实测结论：短视频类 App（如抖音）虽完整注册了 NowPlaying 信息，但不实现 nextTrack/previousTrack 处理器，系统切歌命令送达后无人处理 —— 这类 App 只能快退快进。</string>
+			<string>长按画面可切换「自由摆放」：解除系统把画中画钉在屏幕边缘的吸附，之后可随意拖动、双指缩放。再长按恢复系统吸附。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -114,7 +96,7 @@
 			<key>key</key>
 			<string>FrameWidth</string>
 			<key>label</key>
-			<string>外框宽度（顶/左右边框粗细）</string>
+			<string>外框宽度</string>
 			<key>min</key>
 			<real>4</real>
 			<key>max</key>
@@ -126,7 +108,7 @@
 			<key>default</key>
 			<real>8</real>
 			<key>footnote</key>
-			<string>单位 pt：视频顶部与左右三边黑边的厚度。数值越大壳越厚。当前值显示在这一行标题上。</string>
+			<string>视频顶部与左右两侧黑边的厚度。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -136,7 +118,7 @@
 			<key>key</key>
 			<string>BarHeight</string>
 			<key>label</key>
-			<string>底部高度（视频下方黑边条）</string>
+			<string>底部高度</string>
 			<key>min</key>
 			<real>28</real>
 			<key>max</key>
@@ -148,7 +130,7 @@
 			<key>default</key>
 			<real>40</real>
 			<key>footnote</key>
-			<string>单位 pt：视频底部黑边的厚度。三颗按钮（上一个/播放暂停/下一个）就排在这条黑边里。当前值显示在这一行标题上。</string>
+			<string>视频下方黑边（可拖动进度条所在处）的厚度。</string>
 		</dict>
 		<dict>
 			<key>cell</key>

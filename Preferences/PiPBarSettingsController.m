@@ -34,6 +34,7 @@
 static const void *kPiPSliderBoundKey = &kPiPSliderBoundKey;   // 已挂 target 标记
 static const void *kPiPSliderPrefKey  = &kPiPSliderPrefKey;    // 属于哪个偏好项
 static const void *kPiPSliderCellKey  = &kPiPSliderCellKey;    // 记住所属 cell（弱）
+static const void *kPiPHintLabelKey   = &kPiPHintLabelKey;     // 滑块右侧说明小字
 
 // 设置面板自己的文件日志（独立文件，方便与 tweak 日志一起回传）
 // v0.14：加 256KB 上限自动清空重记 —— 上一版因判重失效被刷到 3.4MB。
@@ -179,8 +180,9 @@ static void pipPrefsLogImpl(NSString *line) {
         objc_setAssociatedObject(sl, kPiPSliderBoundKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         bound++;
 
-        // 进页面先把当前值写进标题（用户一进来就能看到数值）
+        // 进页面先把当前值写进标题 + 建好右侧说明小字
         [self pipUpdateTitleForSlider:sl key:key value:sl.value];
+        [self pipLayoutHintLabel:[self pipEnsureHintLabelForCell:cell] inCell:cell];
         pipPrefsLog(@"bind: %@ 滑块已挂 target（min=%.0f max=%.0f value=%.0f）",
                     key, (double)sl.minimumValue, (double)sl.maximumValue, (double)sl.value);
     }
@@ -199,7 +201,9 @@ static void pipPrefsLogImpl(NSString *line) {
     pipPrefsLog(@"bind: 扫描到 cell=%d，本轮新绑定=%d", (int)cells.count, bound);
 }
 
-// 数值显示：直接改【滑块所在 cell 自己的】标题文字 —— 与滑块同一行、跟手即时
+// 数值显示：直接改【滑块所在 cell 自己的】标题文字 —— 与滑块同一行、跟手即时。
+// v0.17：按用户要求，把「说明文案」缩小后挪到【同一行右侧】（不再用 cell 下方的
+// footnote 长段文字），并把「当前值」放在标题里。左标题 + 右侧小字，两行合一。
 - (void)pipUpdateTitleForSlider:(UISlider *)sl key:(NSString *)key value:(CGFloat)f {
     NSString *base = [self pipBaseNameForKey:key];
     if (base == nil) return;
@@ -209,10 +213,50 @@ static void pipPrefsLogImpl(NSString *line) {
         cell.textLabel.text = txt;
         [cell setNeedsLayout];
     }
+    // 右侧说明小字：重新取一次并更新
+    UILabel *hint = [self pipEnsureHintLabelForCell:cell];
+    if (hint != nil) {
+        NSString *h = [self pipHintTextForKey:key];
+        if (![hint.text isEqualToString:h]) {
+            hint.text = h;
+            [self pipLayoutHintLabel:hint inCell:cell];
+        }
+    }
     // 同步 specifier 名字，重进页面时也带着数值
     for (PSSpecifier *spec in _specifiers) {
         if ([[spec propertyForKey:@"key"] isEqualToString:key]) { spec.name = txt; break; }
     }
+}
+
+// 滑块右侧的说明小字（单位/范围），v0.17 新增
+- (NSString *)pipHintTextForKey:(NSString *)key {
+    if ([key isEqualToString:@"FrameWidth"]) return @"顶/左右两侧 · 4–24pt";
+    if ([key isEqualToString:@"BarHeight"])  return @"底部黑边 · 28–80pt";
+    return nil;
+}
+
+- (UILabel *)pipEnsureHintLabelForCell:(UITableViewCell *)cell {
+    if (cell == nil) return nil;
+    UILabel *hint = objc_getAssociatedObject(cell, kPiPHintLabelKey);
+    if (hint == nil) {
+        hint = [[UILabel alloc] initWithFrame:CGRectZero];
+        hint.font = [UIFont systemFontOfSize:10.0];
+        hint.textColor = [UIColor grayColor];
+        hint.textAlignment = NSTextAlignmentRight;
+        hint.userInteractionEnabled = NO;    // 不吃触摸
+        [cell.contentView addSubview:hint];
+        objc_setAssociatedObject(cell, kPiPHintLabelKey, hint, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return hint;
+}
+
+// 右上角定位：在标题行右侧、避开文字（用 cell 宽度的一半点右对齐）
+- (void)pipLayoutHintLabel:(UILabel *)hint inCell:(UITableViewCell *)cell {
+    if (hint == nil || cell == nil) return;
+    [hint sizeToFit];
+    CGFloat w = CGRectGetWidth(cell.contentView.bounds);
+    CGFloat h = CGRectGetHeight(hint.bounds);
+    hint.frame = CGRectMake(MAX(80.0, w * 0.52), 5.0, MAX(60.0, w * 0.46), h > 0 ? h : 13.0);
 }
 
 - (void)pipSliderChanged:(UISlider *)sender {

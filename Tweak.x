@@ -32,20 +32,18 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.15"
+#define PIP_BUILD_TAG @"v0.16"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
 // —— 偏好（CFPreferences 直读全局 plist；SpringBoard 以 mobile 身份运行，无容器隔离坑）——
 static BOOL gEnabled = YES;
 static BOOL gShowFrame = YES;
-static BOOL gShowButtons = YES;
 static BOOL gFileLog = YES;       // 默认开：日志是排障生命线，别让用户摸黑
 static BOOL gDebugLog = NO;
 static CGFloat gFrameW = 8.0;     // 顶/左右边框宽（用户反馈 12 太粗 → 默认 8）
 static CGFloat gBarH = 40.0;      // 底部控制条高
 static BOOL gExtendHit = YES;        // 扩展命中区：让壳外/底部黑边也能接收触摸（按钮放黑边的前提）
-static int gButtonAction = 0;        // 0=自动(探测切歌) 1=强制切歌(不回退) 2=始终 ±10s
 static BOOL gShowBarProgress = YES;  // 显示底部可拖动进度条
 
 // roothide per-app 容器隔离：Settings 里 CFPreferences 写的域，SpringBoard 读不到
@@ -62,12 +60,11 @@ static void pipReadPrefs(void) {
     id v;
     if ((v = pipPref(@"Enabled")) != nil) gEnabled = [v boolValue];
     if ((v = pipPref(@"ShowFrame")) != nil) gShowFrame = [v boolValue];
-    if ((v = pipPref(@"ShowButtons")) != nil) gShowButtons = [v boolValue];
     if ((v = pipPref(@"FileLog")) != nil) gFileLog = [v boolValue];
     if ((v = pipPref(@"DebugLog")) != nil) gDebugLog = [v boolValue];
     if ((v = pipPref(@"ExtendHit")) != nil) gExtendHit = [v boolValue];
-    if ((v = pipPref(@"ButtonAction")) != nil) gButtonAction = [v intValue];
     if ((v = pipPref(@"ShowProgress")) != nil) gShowBarProgress = [v boolValue];
+    if ((v = pipPref(@"FreeMove")) != nil) gFreeMove = [v boolValue];
     if ((v = pipPref(@"FrameWidth")) != nil) {
         CGFloat f = [v floatValue];
         if (f >= 2.0 && f <= 30.0) gFrameW = f;
@@ -166,10 +163,6 @@ static BOOL gSeekBusy = NO;          // 拖动/seek 进行中：暂停外推，�
 static double gDragTargetSec = 0;    // 拖动中的目标秒数
 
 // v0.12：切歌「试探 → 校验 → 回退」状态机
-static BOOL gTrackPending = NO;      // 已发切歌命令，等待校验
-static double gTrackSentAt = 0;
-static NSString *gTrackTitleSnapshot = nil;   // 发出时的条目标题（校验用）
-static BOOL gTrackForward = YES;
 
 static NSString *const kMRKeyIsMusicApp   = @"kMRMediaRemoteNowPlayingInfoIsMusicApp";
 static NSString *const kMRKeyTotalTracks  = @"kMRMediaRemoteNowPlayingInfoTotalTrackCount";
@@ -277,46 +270,6 @@ static BOOL pipMRCanTrackSkip(void) {
     return gMRIsMusicApp || gMRHasPlaylist;
 }
 
-// 发切歌命令并进入「等待校验」状态；返回 YES 表示已尝试（后续由 tick 校验/回退）
-static BOOL pipSendTrackSkip(BOOL forward) {
-    if (gMRSendCommand == NULL) return NO;
-    if (gButtonAction == 2) return NO;                                   // 档位=始终 ±10s
-    if (gButtonAction == 0 && !pipMRCanTrackSkip()) return NO;          // 档位=自动且探测不到
-    BOOL sent = gMRSendCommand(forward ? 4 : 5, nil);
-    if (sent) {
-        gTrackPending = YES;
-        gTrackForward = forward;
-        gTrackSentAt = [[NSDate date] timeIntervalSinceReferenceDate];
-        gTrackTitleSnapshot = [gMRTitle copy] ?: @"";
-    }
-    return sent;
-}
-
-// v0.12 校验：发了切歌命令后等 1.5 秒，若条目标题没变 ⇒ App 没接这个命令，
-// 自动补发 Pegasus ±10s 快退快进（用户无需手动切档位）。
-static void pipVerifyTrackSkip(void) {
-    if (!gTrackPending) return;
-    double now = [[NSDate date] timeIntervalSinceReferenceDate];
-    if (now - gTrackSentAt < 1.5) return;
-    gTrackPending = NO;
-    NSString *cur = gMRTitle ?: @"";
-    if ([cur isEqualToString:(gTrackTitleSnapshot ?: @"")]) {
-        PIPLog(@"track 校验失败：1.5s 内条目未变（title=%@ uid=%@）⇒ App 未实现 nextTrack/previousTrack，"
-               @"自动回退 ±10s", cur, gMRUniqueID ?: @"-");
-        Class cmdCls = objc_getClass("PGCommand");
-        SEL mk = sel_registerName("commandForPlaybackAction:associatedDoubleValue:");
-        PGPictureInPictureViewController *c = (PGPictureInPictureViewController *)gContentVC;
-        if (cmdCls != nil && c != nil && [cmdCls respondsToSelector:mk]) {
-            double off = gTrackForward ? 10.0 : -10.0;
-            id (*build)(id, SEL, long long, double) =
-                (id (*)(id, SEL, long long, double))objc_msgSend;
-            [c handleCommand:build(cmdCls, mk, 1LL, off)];
-        }
-    } else {
-        PIPLog(@"track 校验成功：条目已切换（%@ → %@）", gTrackTitleSnapshot, cur);
-    }
-}
-
 #pragma mark - 外框 + 按钮条
 
 @class PIPFrameView;   // 前置声明：下面的文件级静态指针在 @interface 之前，需先告诉编译器类型
@@ -344,6 +297,15 @@ static BOOL gPickQuiet = NO;
 #define PIP_PICK_LOG(fmt, ...) do { if (!gPickQuiet) PIPLog(fmt, ##__VA_ARGS__); } while (0)
 static int gTickN = 0;   // 真宿主未找到时的重扫节流计数（每 5 帧 ≈ 12Hz）
 
+// v0.16：FreePIP 式长按解吸 —— 系统 PiP 用 NSLayoutConstraint 把窗口钉在屏幕边缘，
+// 拖动时会被"吸"回边缘。FreePIP（sohsatoh，GPL-3，此处仅参考机制、代码独立实现）
+// 的做法是：长按切换 locked，用 CGAffineTransform 接管位移与缩放。
+// 我们照此实现：长按视频区切换「吸附/自由」，自由态下可任意拖动、双指缩放。
+static BOOL gFreeMove = NO;          // NO=系统吸附（默认） YES=自由摆放
+static UIPanGestureRecognizer *gFreePan = nil;
+static UIPinchGestureRecognizer *gFreePinch = nil;
+static UILongPressGestureRecognizer *gFreeLongPress = nil;
+
 @interface PIPFrameView : UIView
 @property (nonatomic, strong) CAShapeLayer *caseLayer;
 @property (nonatomic, strong) CAShapeLayer *edgeLayer;
@@ -355,7 +317,6 @@ static int gTickN = 0;   // 真宿主未找到时的重扫节流计数（每 5 �
 @property (nonatomic, strong) UILabel *timeLabel;
 @property (nonatomic, strong) UIPanGestureRecognizer *seekPan;
 @property (nonatomic, strong) UITapGestureRecognizer *seekTap;
-@property (nonatomic, copy) void (^onTap)(NSInteger tag);
 // v0.11：外框矩形（本壳坐标系，含底部黑边）—— 供 pointInside 扩展命中区用
 @property (nonatomic, assign) CGRect hitRect;
 // v0.15：拖动中（此时进度由手指决定，不被心跳覆盖）
@@ -442,20 +403,8 @@ static void pipSwizzlePointInsideOn(Class cls) {
 // 投进视频区，画面像蒙了层黑遮罩（v0.5 用户反馈实锤）。
 // （@interface PIPFrameView 已上移到命中区 swizzle 之前声明）
 
-// 缓存图标：play/pause 随播放状态切换（v0.3 用户反馈「播放暂停不会变化」）
-static UIImage *pipIcon(BOOL playing) {
-    static UIImage *playImg, *pauseImg;
-    if (playImg == nil) {
-        playImg  = [UIImage systemImageNamed:@"play.fill"];
-        pauseImg = [UIImage systemImageNamed:@"pause.fill"];
-    }
-    // 固定 15pt：小而精致；不跟 Dynamic Type 忽大忽小
-    UIImage *base = playing ? pauseImg : playImg;
-    if (base == nil) return nil;
-    UIImage *sized = [base imageWithConfiguration:
-                      [UIImageSymbolConfiguration configurationWithPointSize:15.0]];
-    return sized != nil ? sized : base;
-}
+// v0.16：三颗按钮已移除（实测抖音等短视频 App 不实现 nextTrack/previousTrack，
+// 切歌不可用 ⇒ 改用系统自带控制条），故 play/pause 图标缓存函数一并移除。
 
 // —— 按钮宿主（v0.6 重大简化）——
 // v0.5 把按钮放独立悬浮 UIWindow：真机两轮都没渲染出来（iOS 16 无 windowScene 的
@@ -521,48 +470,39 @@ static UIImage *pipIcon(BOOL playing) {
                                                                 action:@selector(pipSeekGesture:)];
         [self addGestureRecognizer:self.seekPan];
         [self addGestureRecognizer:self.seekTap];
-        // 三颗按钮：壳的子视图（壳实测渲染位置正确；按钮在窗口边界内 ⇒ 必然可点）
-        // v0.10：左右键恢复切歌语义（backward.end.fill / forward.end.fill）——
-        // 走 MediaRemote 切歌通道，App 不支持切歌时自动回退 ±10s 快退快进。
-        [self pipAddButtonWithTag:1 icon:@"backward.end.fill" fallback:@"◀◀"];
-        [self pipAddButtonWithTag:2 icon:nil fallback:@"▶"];   // play/pause 图标 layoutSubviews 里按状态设
-        [self pipAddButtonWithTag:3 icon:@"forward.end.fill" fallback:@"▶▶"];
+
+        // v0.16：FreePIP 式长按解吸 + 自由拖动 + 双指缩放
+        gFreeLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self
+                                                                        action:@selector(pipToggleFree:)];
+        gFreeLongPress.minimumPressDuration = 0.45;
+        [self addGestureRecognizer:gFreeLongPress];
+        gFreePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pipFreePan:)];
+        gFreePan.enabled = NO;    // 仅自由态启用，避免与系统 PiP 拖动打架
+        [self addGestureRecognizer:gFreePan];
+        gFreePinch = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(pipFreePinch:)];
+        gFreePinch.enabled = NO;
+        [self addGestureRecognizer:gFreePinch];
+        // v0.16：三颗按钮已移除（切歌通道对短视频 App 无效，改用系统自带控制条）
         [self setNeedsLayout];
     }
     return self;
 }
 
-- (void)pipAddButtonWithTag:(NSInteger)tag icon:(NSString *)icon fallback:(NSString *)fb {
-    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-    b.tag = tag;
-    b.tintColor = UIColor.whiteColor;
-    UIImage *base = icon != nil ? [UIImage systemImageNamed:icon] : nil;
-    if (base != nil) {
-        UIImage *sized = [base imageWithConfiguration:
-                          [UIImageSymbolConfiguration configurationWithPointSize:15.0]];
-        [b setImage:(sized != nil ? sized : base) forState:UIControlStateNormal];
-    } else {
-        [b setTitle:fb forState:UIControlStateNormal];
-        b.titleLabel.font = [UIFont boldSystemFontOfSize:12.0];
-    }
-    [b addTarget:self action:@selector(pipButtonTapped:)
- forControlEvents:UIControlEventTouchUpInside];
-    [self addSubview:b];
-}
 
-- (void)pipButtonTapped:(UIButton *)sender {
-    if (self.onTap != nil) self.onTap(sender.tag);
-}
 
 // 整层透明铺在容器上：只有摸到按钮/进度条才接管，其余穿透（保住 PiP 原生拖动/单击/双击手势）
+// v0.16 自由摆放态例外：此时壳必须接收视频区的拖动/长按/双指，否则无法移动窗口。
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
-    if (hit == self) return nil;
-    // v0.15：进度条命中区（trackRect 上下各扩 12pt 方便手指点中）也算命中，
-    // 否则会被上面的「穿透」逻辑吞掉，拖不动。
-    if (hit == nil && CGRectGetWidth(self.trackRect) > 1.0) {
-        CGRect hot = CGRectInset(self.trackRect, 0, -12.0);
-        if (CGRectContainsPoint(hot, point)) return self;
+    if (hit == self) {
+        if (gFreeMove) return self;      // 自由态：接管视频区手势
+        // v0.15：进度条命中区（trackRect 上下各扩 12pt 方便手指点中）也算命中，
+        // 否则会被上面的「穿透」逻辑吞掉，拖不动。
+        if (CGRectGetWidth(self.trackRect) > 1.0) {
+            CGRect hot = CGRectInset(self.trackRect, 0, -12.0);
+            if (CGRectContainsPoint(hot, point)) return self;
+        }
+        return nil;
     }
     return hit;
 }
@@ -582,6 +522,46 @@ static UIImage *pipIcon(BOOL playing) {
         && !CGRectEqualToRect(self.frame, sup.bounds)) {
         self.frame = sup.bounds;   // 触发下一轮 layoutSubviews，届时已相等，不会死循环
     }
+}
+
+#pragma mark - v0.16 FreePIP 式长按解吸
+
+// 长按视频区：切换「系统吸附」↔「自由摆放」
+- (void)pipToggleFree:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    gFreeMove = !gFreeMove;
+    gFreePan.enabled = gFreeMove;
+    gFreePinch.enabled = gFreeMove;
+    // 自由态需要能接到拖动 ⇒ hitTest 必须放行视频区
+    self.userInteractionEnabled = YES;
+    [self setNeedsLayout];
+    [gInstalledFrame setNeedsLayout];
+    PIPLog(@"free-move %@（长按切换；%@）", gFreeMove ? @"开：可自由拖动/双指缩放" : @"关：交回系统吸附",
+           gFreeMove ? @"再长按恢复吸附" : @"长按可随时解除吸附");
+}
+
+// 自由态拖动：把位移量累加到宿主视图的 transform 上（FreePIP 同思路）
+- (void)pipFreePan:(UIPanGestureRecognizer *)gr {
+    UIView *target = gVideoHost;
+    if (!gFreeMove || target == nil) return;
+    CGPoint t = [gr translationInView:target.superview];
+    [gr setTranslation:CGPointZero inView:target.superview];
+    CGAffineTransform tf = target.transform;
+    target.transform = CGAffineTransformTranslate(tf, t.x, t.y);
+}
+
+// 自由态缩放：以视频宿主自身中心缩放（限制 0.5x ~ 2.5x，避免缩到看不见）
+- (void)pipFreePinch:(UIPinchGestureRecognizer *)gr {
+    UIView *target = gVideoHost;
+    if (!gFreeMove || target == nil) return;
+    CGFloat s = gr.scale;
+    gr.scale = 1.0;
+    CGAffineTransform cur = target.transform;
+    CGFloat curScale = sqrt(cur.a * cur.a + cur.c * cur.c);
+    if (curScale < 0.01) curScale = 1.0;
+    CGFloat next = MAX(0.5, MIN(2.5, curScale * s));
+    CGFloat factor = next / curScale;
+    target.transform = CGAffineTransformScale(cur, factor, factor);
 }
 
 #pragma mark - v0.15 进度条
@@ -613,6 +593,12 @@ static NSString *pipTimeText(double sec) {
 // 只更新进度条三件套（不触发布局，放在心跳里每帧跑也便宜）
 - (void)pipRefreshProgress {
     BOOL haveDur = (gMRDuration > 1.0);
+    // ⚠️ v0.15 真机修复：首帧 layoutSubviews 时 gMRDuration 还是 0 ⇒ trackRect 被置零；
+    // 之后 MediaRemote 探到时长（dur=23.3）也不再触发布局 ⇒ 进度条永远不显示。
+    // 这里做懒初始化：数据到位后主动补一次布局。
+    if (haveDur && CGRectGetWidth(self.trackRect) < 1.0) {
+        [self setNeedsLayout];
+    }
     BOOL show = haveDur && !gExpandedUI && gEnabled && gShowBarProgress;
     self.trackLayer.hidden = !show;
     self.fillLayer.hidden = !show;
@@ -720,7 +706,7 @@ static NSString *pipTimeText(double sec) {
     // 用户截图实锤）误判成全屏而整壳隐藏。只有宽、高同时 ≈ 屏幕才算全屏播放。
     CGSize scr = [UIScreen mainScreen].bounds.size;
     gExpandedUI = vrW > scr.width * 0.95 && vrH > scr.height * 0.95;
-    self.hidden = !gEnabled || (!gShowFrame && !gShowButtons) || gExpandedUI;
+    self.hidden = !gEnabled || (!gShowFrame && !gShowBarProgress) || gExpandedUI;
 
     CGRect outer = CGRectMake(CGRectGetMinX(vr) - sw, CGRectGetMinY(vr) - sw,
                               vrW + sw * 2.0, vrH + sw + bh);
@@ -745,53 +731,27 @@ static NSString *pipTimeText(double sec) {
         self.edgeLayer.path = nil;
     }
 
-    // —— 底部黑边：上排进度条 + 下排三颗按钮（v0.15）——
-    BOOL showBar = gShowButtons && !gExpandedUI;
+    // —— 底部黑边（v0.16）：只放进度条，三颗按钮已移除（切歌不可用，改用系统控制条）——
     CGFloat inset = 8.0;
-    CGRect barRect = CGRectZero;
-    self.barLayer.hidden = !showBar;
-    if (showBar) {
-        // 黑边区 = 视频下沿往下 bh（bh 由设置控制，默认 40，最小 28）
-        CGFloat chin = MAX(bh, 26.0);
-        // 有进度条时把黑边分两行：进度条占上沿，按钮占剩余空间
-        CGFloat progH = (gShowBarProgress && gMRDuration > 1.0) ? 3.0 : 0.0;
-        CGFloat capH = MAX(chin - 6.0 - progH - 6.0, 18.0);
-        CGFloat capY = CGRectGetMaxY(vr) + (chin - progH - 6.0 - capH) / 2.0 + (progH > 0 ? 3.0 : 0.0);
-        barRect = CGRectMake(CGRectGetMinX(vr) + inset, capY, vrW - inset * 2.0, capH);
-        self.barLayer.path =
-            [UIBezierPath bezierPathWithRoundedRect:barRect
-                                       cornerRadius:CGRectGetHeight(barRect) / 2.0].CGPath;
-
-        // 进度条轨道：黑边最上沿，横向近乎铺满
-        if (progH > 0) {
-            CGFloat ty = CGRectGetMaxY(vr) + 5.0;
-            self.trackRect = CGRectMake(CGRectGetMinX(vr) + inset, ty,
-                                        vrW - inset * 2.0, progH);
-            self.trackLayer.path =
-                [UIBezierPath bezierPathWithRoundedRect:self.trackRect
-                                           cornerRadius:progH / 2.0].CGPath;
-        } else {
-            self.trackRect = CGRectZero;
-        }
+    CGFloat chin = MAX(bh, 22.0);
+    BOOL showProg = gShowBarProgress && gMRDuration > 1.0 && gEnabled && !gExpandedUI;
+    if (showProg) {
+        // 进度条居中于黑边，横向近乎铺满；上下留出可点按的热区
+        CGFloat ty = CGRectGetMaxY(vr) + chin / 2.0 - 1.5;
+        self.trackRect = CGRectMake(CGRectGetMinX(vr) + inset, ty,
+                                    vrW - inset * 2.0, 3.0);
+        self.trackLayer.path =
+            [UIBezierPath bezierPathWithRoundedRect:self.trackRect cornerRadius:1.5].CGPath;
     } else {
-        self.barLayer.path = nil;
         self.trackRect = CGRectZero;
+        self.trackLayer.path = nil;
     }
+    self.barLayer.hidden = YES;   // 胶囊底衬随按钮一起退场
     [self pipRefreshProgress];
 
-    CGFloat xs[3] = {0.22, 0.50, 0.78};
-    CGFloat btnH = MIN(30.0, MAX(CGRectGetHeight(barRect) - 4.0, 18.0));
-    CGFloat btnW = 44.0;
-    CGFloat by = CGRectGetMinY(barRect) + (CGRectGetHeight(barRect) - btnH) / 2.0;
-    NSUInteger i = 0;
+    // 按钮已移除：把残留的 UIButton 一并清掉（防御：老版本装过的话）
     for (UIView *v in self.subviews) {
-        if (![v isKindOfClass:[UIButton class]]) continue;
-        CGFloat cx = CGRectGetMinX(barRect) + CGRectGetWidth(barRect) * xs[i];
-        v.frame = CGRectMake(cx - btnW / 2.0, by, btnW, btnH);   // 必须 frame，不是 center（v0.2 踩坑）
-        v.hidden = !showBar;
-        if (v.tag == 2) [(UIButton *)v setImage:pipIcon(gPlaying) forState:UIControlStateNormal];
-        i++;
-        if (i >= 3) break;
+        if ([v isKindOfClass:[UIButton class]]) [v removeFromSuperview];
     }
 }
 
@@ -814,7 +774,7 @@ static NSString *pipTimeText(double sec) {
     (void)link;
     PIPFrameView *f = gInstalledFrame;
     if (f == nil) { gLastVR = (CGRect){{0,0},{0,0}}; return; }
-    if (!gShowFrame && !gShowButtons) { gLastVR = (CGRect){{0,0},{0,0}}; return; }
+    if (!gShowFrame && !gShowBarProgress) { gLastVR = (CGRect){{0,0},{0,0}}; return; }
     // v0.8 关键修复：只要还不是真视频宿主（PGLayerHost*）就节流重扫。
     // v0.7 只在 host 无尺寸时重扫 —— 但 fallback 全屏容器 PGHitTestExtendableView
     // 装完第一帧就有尺寸 ⇒ 重扫停摆 ⇒ 壳锁死在全屏容器上 ⇒ gExpandedUI 误判 ⇒ 整壳隐藏
@@ -836,7 +796,6 @@ static NSString *pipTimeText(double sec) {
     // v0.10：切歌能力探测（2 秒节流，内部已限频；只是读 mediaserverd 的 now playing 标量）
     pipEnsureMediaRemote();
     pipMRRefresh();
-    pipVerifyTrackSkip();   // v0.12：切歌后 1.5s 校验，没换条目就自动补 ±10s
     // v0.15：每帧轻量刷新进度条（只改三个 layer 的 path/frame，不做布局，开销极小）
     [gInstalledFrame pipRefreshProgress];
 
@@ -1002,7 +961,7 @@ static void pipApplyFrameState(void) {
         if (f == nil) return;
         [f setNeedsLayout];          // 壳的 hidden/几何/按钮全在 layoutSubviews 里按当前偏好算
         PIPLog(@"reload applied: enabled=%d frame=%d buttons=%d w=%.0f barh=%.0f",
-               gEnabled, gShowFrame, gShowButtons, (double)gFrameW, (double)gBarH);
+               gEnabled, gShowFrame, gShowBarProgress, (double)gFrameW, (double)gBarH);
     });
 }
 
@@ -1062,55 +1021,8 @@ static void pipInitPegasusOnce(void);
         PIPFrameView *frame = [[frameCls alloc] initWithFrame:canvas.bounds];
         frame.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
-        // 按钮点击逻辑（v0.6：按钮在壳上，不再有独立窗口）
-        __weak UIViewController *weakContent = content;
-        frame.onTap = ^(NSInteger tag) {
-            UIViewController *c = weakContent;
-            if (c == nil) return;
-            if (tag == 2) {
-                // 播放/暂停：Pegasus 命令通道。PGCommand 必须运行时解析（链接符号坑，v0.1 踩过）
-                Class cmdCls = objc_getClass("PGCommand");
-                SEL sel = sel_registerName("commandForSetPlaying:");
-                if (cmdCls != nil && [cmdCls respondsToSelector:sel]) {
-                    gPlaying = !gPlaying;
-                    id (*setPlaying)(id, SEL, BOOL) = (id (*)(id, SEL, BOOL))objc_msgSend;
-                    id cmd = setPlaying(cmdCls, sel, gPlaying);
-                    [(PGPictureInPictureViewController *)c handleCommand:cmd];
-                    PIPLog(@"play/pause -> setPlaying=%d", gPlaying);
-                    [gInstalledFrame setNeedsLayout];   // 立即换 play/pause 图标
-                } else {
-                    PIPLog(@"PGCommand/commandForSetPlaying: 不可用（类没加载或选择子漂移）");
-                }
-            } else {
-                // 上一个(1) / 下一个(3) —— v0.10 双通道：
-                // ① 优先 MediaRemote 切歌（kMRPreviousTrack=5 / kMRNextTrack=4）——
-                //    走 mediaserverd，系统路由到 App 的 MPRemoteCommandCenter，
-                //    这是唯一能真正「切上一个/下一个视频」的通道（画中画自己切不了）。
-                // ② App 不支持切歌（普通网页视频只有单条内容）时，自动回退
-                //    Pegasus 的 ±10s 快退/快进（commandForPlaybackAction:associatedDoubleValue:）。
-                BOOL forward = (tag == 3);
-                if (pipSendTrackSkip(forward)) {
-                    PIPLog(@"track -> %@（已发 MediaRemote 切歌，pid=%d，1.5s 后自动校验）",
-                           forward ? @"kMRNextTrack" : @"kMRPreviousTrack", gMRAppPID);
-                } else {
-                    Class cmdCls = objc_getClass("PGCommand");
-                    SEL mk = sel_registerName("commandForPlaybackAction:associatedDoubleValue:");
-                    if (cmdCls != nil && [cmdCls respondsToSelector:mk]) {
-                        double off = forward ? 10.0 : -10.0;
-                        id (*build)(id, SEL, long long, double) =
-                            (id (*)(id, SEL, long long, double))objc_msgSend;
-                        id cmd = build(cmdCls, mk, 1LL, off);
-                        [(PGPictureInPictureViewController *)c handleCommand:cmd];
-                        PIPLog(@"skip -> action=1 offset=%.0f（回退快退/快进：该 App 无切歌能力"
-                               @" music=%d list=%d prohibit=%d）",
-                               off, gMRIsMusicApp, gMRHasPlaylist, gMRProhibitsSkip);
-                    } else {
-                        PIPLog(@"两条通道都不可用：MediaRemote 未加载且 PGCommand 工厂缺失");
-                    }
-                }
-            }
-        };
-
+        // v0.16：三颗按钮已移除（切歌不可用，改用系统控制条）；
+        // 进度条与长按解吸都在 PIPFrameView 内部处理，无需外部 block。
         [canvas addSubview:frame];
         [canvas bringSubviewToFront:frame];
         gInstalledFrame = frame;
@@ -1221,6 +1133,6 @@ static void pipInitPegasusOnce(void) {
         pipDarwinCallback, CFSTR(PIP_NOTIFY), NULL,
         CFNotificationSuspensionBehaviorDeliverImmediately);
     PIPLog(@"loaded for SpringBoard | build=" PIP_BUILD_TAG
-           " enabled=%d frame=%d buttons=%d w=%.0f barh=%.0f filelog=%d",
-           gEnabled, gShowFrame, gShowButtons, (double)gFrameW, (double)gBarH, gFileLog);
+           " enabled=%d frame=%d progress=%d w=%.0f barh=%.0f filelog=%d",
+           gEnabled, gShowFrame, (double)gFrameW, (double)gBarH, gFileLog);
 }

@@ -54,15 +54,16 @@
 
 ## 已知限制
 
-- 播放/暂停、左右键均已可用。左右键**优先走 MediaRemote 切歌通道**
-  （`kMRNextTrack`/`kMRPreviousTrack`），App 无切歌能力时自动回退 ±10s 快退/快进。
-  可用设置里的「左右键行为」切换档位。
-- **底部可拖动进度条**（v0.15）：走 `MRMediaRemoteSetElapsedTime`（官方 seek 接口）。
-  直播流/无总时长时不显示；部分 App 的 seek 可能触发短暂停顿。
+- 播放/暂停、进度拖动均可用（进度条走 `MRMediaRemoteSetElapsedTime` 官方 seek 接口）。
+  直播流/无总时长时不显示进度条。
+- **长按解除吸附**（v0.16）：系统 PiP 用 NSLayoutConstraint 把窗口钉在屏幕边缘，
+  长按画面可切换「自由摆放」，之后可任意拖动、双指缩放（0.5x~2.5x），再长按恢复吸附。
+  机制参考 FreePIP（sohsatoh，GPL-3）——仅借鉴思路，代码独立实现。
 - **切歌的硬限制（实测）**：短视频类 App（如抖音）虽完整注册了 NowPlaying 信息，
   但**不实现 `MPRemoteCommandCenter` 的 nextTrack/previousTrack handler**，
   系统切歌命令送达后无人处理（实测连发十余次 title 恒定不变）——
-  这不是 tweak 能弥补的，需要 App 侧实现。详见「已知限制 → 切歌」。
+  这不是 tweak 能弥补的，需要 App 侧实现。故 v0.16 **移除了三颗自绘按钮**（切歌不可用），
+  播放控制改用系统自带控制条。
 - 只支持系统原生 PiP，App 内自建的假画中画不在射程内。
 - roothide 下设置面板走「编译型 PreferenceLoader bundle + 全局 plist 直写桥」
   （绕过 per-app NSUserDefaults 容器隔离，SpringBoard 才能读到）。
