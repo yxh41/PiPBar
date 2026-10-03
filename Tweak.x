@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.21"
+#define PIP_BUILD_TAG @"v0.22"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -508,12 +508,15 @@ static void pipSwizzlePointInsideOn(Class cls) {
         gFreeLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self
                                                                         action:@selector(pipToggleFree:)];
         gFreeLongPress.minimumPressDuration = 0.45;
+        gFreeLongPress.delegate = self;   // v0.22：长按后同指续拖需要 simultaneous 放行
         [self addGestureRecognizer:gFreeLongPress];
         gFreePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pipFreePan:)];
         gFreePan.enabled = NO;    // 仅自由态启用，避免与系统 PiP 拖动打架
+        gFreePan.delegate = self;
         [self addGestureRecognizer:gFreePan];
         gFreePinch = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(pipFreePinch:)];
         gFreePinch.enabled = NO;
+        gFreePinch.delegate = self;
         [self addGestureRecognizer:gFreePinch];
         // v0.16：三颗按钮已移除（切歌通道对短视频 App 无效，改用系统自带控制条）
         [self setNeedsLayout];
@@ -557,14 +560,31 @@ static void pipSwizzlePointInsideOn(Class cls) {
     }
 }
 
-#pragma mark - v0.18 手势仲裁（进度条优先于自由拖动）
+#pragma mark - v0.22 手势仲裁（按落点分家）
 
-// 进度条手势放行；自由拖动/缩放一律拦下 —— 由 pipSeekGesture 里的热区判定
-// 决定到底谁来处理这次触摸，两者不再互相抢。
+// v0.22 修复：v0.18 的仲裁把 gFreePan/gFreePinch **无条件 return NO** —— 自由拖动
+// 从 v0.18 起就是死的；而自由态下系统 pan 又被 pipShouldBlockSystemPan 拦掉，
+// 结果长按解吸后窗口谁都拖不动（真机日志 system pan blocked 刷屏数百行）。
+// 新规则：进度条热区内归进度条，热区外归自由拖动，互不侵占。
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gr {
-    if (gr == self.seekPan || gr == self.seekTap) return YES;
-    if (gr == gFreePan || gr == gFreePinch) return NO;
     if (gr == gFreeLongPress) return YES;
+    if (gr == self.seekPan || gr == self.seekTap) {
+        // 进度条手势只在热区内参与；热区外拒绝 begin，把手势位让出来
+        if (CGRectGetWidth(self.trackRect) > 1.0) {
+            CGRect hot = CGRectInset(self.trackRect, -8.0, -20.0);
+            return CGRectContainsPoint(hot, [gr locationInView:self]);
+        }
+        return NO;
+    }
+    if (gr == gFreePan) {
+        // 热区内让给进度条（避免「拖进度条窗口跟着跑」），其余放行
+        if (CGRectGetWidth(self.trackRect) > 1.0) {
+            CGRect hot = CGRectInset(self.trackRect, -8.0, -20.0);
+            if (CGRectContainsPoint(hot, [gr locationInView:self])) return NO;
+        }
+        return YES;
+    }
+    if (gr == gFreePinch) return YES;
     return YES;
 }
 

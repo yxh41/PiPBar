@@ -4,22 +4,21 @@
 //  直接读写全局 plist 文件（见 PiPBarPrefsBridge.h），与 Tweak.x 的 pipPref
 //  命中同一物理文件，绕开 roothide per-app NSUserDefaults 容器隔离。
 //
-//  v0.21 滑块方案（照用户参考图重做，前版本全部废弃）：
-//   失败史（v0.11~v0.20）：PSSliderCell 天生「标签左、滑条右」，滑条只占半行宽，
-//   真机上极难点中。此前所有修法——扫描 cell 认领滑块、改滑条 frame、加整行命中层——
-//   都是在跟 PSSliderCell 的内部布局搏斗，每修一处就引入新问题（拖不动 / 文字叠回 /
-//   状态互相打断）。
-//   最终方案：弃用 PSSliderCell，自定义 PiPSliderCell（用户参考图布局）：
-//       名称（正常字号，黑色，左上独占一行）
-//       [────────────●──────────────]  40
-//   滑条全宽 → 原生手势 → 天生好拉；数值为滑条行右侧灰字；零 hack。
+//  v0.22 滑块供 cell 方式定案：
+//   * v0.21 教训：plist 里把 cell 写成自定义类名，框架**不会** NSClassFromString
+//     实例化它 —— 未知 cell 名被当普通文本行渲染，滑块整个消失（真机截图实证）。
+//   * 定案：plist 写回 PSSliderCell（保证框架把它当真行、行映射正确），然后
+//     重写 tableView:cellForRowAtIndexPath: 拦截这两行，自己供 PiPSliderCell。
+//     数据源就是 self（PSListController 实现 UITableViewDataSource），Objective-C
+//     动态分发必然先进我们的重写；万一重写没生效，兜底是系统原生 PSSliderCell，
+//     退化为「能用但难拉」，不会再整行消失。
+//   * PiPSliderCell 布局（用户参考图）：名称 17pt 黑字左上独占一行 /
+//     全宽原生 UISlider / 数值 17pt 灰字右对齐同行。滑条全宽 → 原生手势好拉。
 //
 
 #import "PiPBarSettingsController.h"
 #import <UIKit/UIKit.h>
 #import <Preferences/PSSpecifier.h>
-#import <Preferences/PSTableCell.h>
-#import <objc/runtime.h>
 #import "PiPBarPrefsBridge.h"
 
 @interface PSListController (PiPPrefsBridge)
@@ -53,51 +52,55 @@ static void pipPrefsLogImpl(NSString *line) {
 
 #define pipPrefsLog(fmt, ...) pipPrefsLogImpl([NSString stringWithFormat:fmt, ##__VA_ARGS__])
 
-#pragma mark - 自定义滑块 cell（参考图布局）
+#pragma mark - 自定义滑块 cell（参考图布局，由控制器直接供出）
 
 @protocol PiPSliderRowDelegate <NSObject>
 - (void)pipSliderValueChanged:(UISlider *)slider specifier:(PSSpecifier *)specifier;
 @end
 
-@interface PiPSliderCell : PSTableCell
+@interface PiPSliderCell : UITableViewCell
+@property (nonatomic, retain) PSSpecifier *pipSpecifier;
+- (void)pipRefresh;
 @end
 
 @implementation PiPSliderCell {
     UILabel *_titleLabel;   // 名称（左上，正常字号）
     UISlider *_slider;      // 全宽滑条（原生手势）
     UILabel *_valueLabel;   // 数值（滑条行右侧，灰字）
-    BOOL _uiBuilt;
 }
 
-- (void)pipCommonInit {
-    if (_uiBuilt) return;
-    _uiBuilt = YES;
-    self.selectionStyle = UITableViewCellSelectionStyleNone;
-    // PSTableCell 父类可能创建默认 titleLabel，藏掉避免叠字
-    self.textLabel.hidden = YES;
-    self.detailTextLabel.hidden = YES;
+- (instancetype)initWithStyle:(UITableViewCellStyle)style
+              reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (self) {
+        self.selectionStyle = UITableViewCellSelectionStyleNone;
+        // 父类默认 textLabel 可能存在，藏掉避免叠字
+        self.textLabel.hidden = YES;
+        self.detailTextLabel.hidden = YES;
 
-    _titleLabel = [[UILabel alloc] init];
-    _titleLabel.font = [UIFont systemFontOfSize:17.0];
-    _titleLabel.textColor = UIColor.labelColor;
-    [self.contentView addSubview:_titleLabel];
+        _titleLabel = [[UILabel alloc] init];
+        _titleLabel.font = [UIFont systemFontOfSize:17.0];
+        _titleLabel.textColor = UIColor.labelColor;
+        [self.contentView addSubview:_titleLabel];
 
-    _valueLabel = [[UILabel alloc] init];
-    _valueLabel.font = [UIFont systemFontOfSize:17.0];
-    _valueLabel.textColor = UIColor.secondaryLabelColor;
-    _valueLabel.textAlignment = NSTextAlignmentRight;
-    [self.contentView addSubview:_valueLabel];
+        _valueLabel = [[UILabel alloc] init];
+        _valueLabel.font = [UIFont systemFontOfSize:17.0];
+        _valueLabel.textColor = UIColor.secondaryLabelColor;
+        _valueLabel.textAlignment = NSTextAlignmentRight;
+        [self.contentView addSubview:_valueLabel];
 
-    _slider = [[UISlider alloc] init];
-    [_slider addTarget:self action:@selector(pipSliderChanged:)
-      forControlEvents:UIControlEventValueChanged];
-    [self.contentView addSubview:_slider];
+        _slider = [[UISlider alloc] init];
+        [_slider addTarget:self action:@selector(pipSliderChanged:)
+          forControlEvents:UIControlEventValueChanged];
+        [self.contentView addSubview:_slider];
+    }
+    return self;
 }
 
-// 统一配置：名称 / 区间 / 当前值。幂等，init 与复用刷新共用。
-- (void)pipConfigureWithSpecifier:(PSSpecifier *)spec {
+// 统一配置：名称 / 区间 / 当前值。幂等，供 cell 与复用共用。
+- (void)pipRefresh {
+    PSSpecifier *spec = self.pipSpecifier;
     if (spec == nil) return;
-    self.specifier = spec;
 
     NSString *nm = spec.name;
     if (nm.length == 0) nm = [spec propertyForKey:@"label"];
@@ -121,36 +124,6 @@ static void pipPrefsLogImpl(NSString *line) {
     _valueLabel.text = [NSString stringWithFormat:@"%.0f", _slider.value];
 }
 
-- (instancetype)initWithSpecifier:(PSSpecifier *)specifier {
-    self = [super initWithStyle:UITableViewCellStyleDefault
-               reuseIdentifier:nil
-                      specifier:specifier];
-    if (self) {
-        [self pipCommonInit];
-        [self pipConfigureWithSpecifier:specifier];
-    }
-    return self;
-}
-
-// 兜底：若框架走这条初始化路径也能正常出 UI
-- (instancetype)initWithStyle:(UITableViewCellStyle)style
-              reuseIdentifier:(NSString *)reuseIdentifier
-                    specifier:(PSSpecifier *)specifier {
-    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier
-                      specifier:specifier];
-    if (self) {
-        [self pipCommonInit];
-        [self pipConfigureWithSpecifier:specifier];
-    }
-    return self;
-}
-
-// 复用 / reload 时重配
-- (void)refreshCellContentsWithSpecifier:(PSSpecifier *)specifier {
-    [super refreshCellContentsWithSpecifier:specifier];
-    [self pipConfigureWithSpecifier:specifier];
-}
-
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGFloat w = CGRectGetWidth(self.contentView.bounds);
@@ -165,10 +138,10 @@ static void pipPrefsLogImpl(NSString *line) {
 
 - (void)pipSliderChanged:(UISlider *)sl {
     _valueLabel.text = [NSString stringWithFormat:@"%.0f", sl.value];
-    id target = self.specifier.target;
+    id target = self.pipSpecifier.target;
     if ([target conformsToProtocol:@protocol(PiPSliderRowDelegate)]) {
         [(id<PiPSliderRowDelegate>)target pipSliderValueChanged:sl
-                                                     specifier:self.specifier];
+                                                     specifier:self.pipSpecifier];
     }
 }
 
@@ -188,6 +161,47 @@ static void pipPrefsLogImpl(NSString *line) {
         _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
     }
     return _specifiers;
+}
+
+- (BOOL)pipIsSliderKey:(NSString *)key {
+    return [key isEqualToString:@"FrameWidth"] || [key isEqualToString:@"BarHeight"];
+}
+
+// 取 indexPath 对应的 specifier（失败返回 nil，调用方回落 super）
+- (PSSpecifier *)pipSpecAt:(NSIndexPath *)indexPath {
+    @try {
+        return [self specifierAtIndexPath:indexPath];
+    } @catch (NSException *e) {
+        return nil;
+    }
+}
+
+#pragma mark - 供 cell：滑块行拦截，其余交回框架
+
+- (UITableViewCell *)tableView:(UITableView *)tableView
+         cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    PSSpecifier *spec = [self pipSpecAt:indexPath];
+    if (spec != nil && [self pipIsSliderKey:[spec propertyForKey:@"key"]]) {
+        PiPSliderCell *cell = [tableView dequeueReusableCellWithIdentifier:@"PiPSliderCell"];
+        if (cell == nil) {
+            cell = [[PiPSliderCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                        reuseIdentifier:@"PiPSliderCell"];
+        }
+        cell.pipSpecifier = spec;
+        [cell pipRefresh];
+        return cell;
+    }
+    return [super tableView:tableView cellForRowAtIndexPath:indexPath];
+}
+
+- (CGFloat)tableView:(UITableView *)tableView
+heightForRowAtIndexPath:(NSIndexPath *)indexPath {
+    PSSpecifier *spec = [self pipSpecAt:indexPath];
+    if (spec != nil && [self pipIsSliderKey:[spec propertyForKey:@"key"]]) {
+        NSNumber *h = [spec propertyForKey:@"height"];
+        return h != nil ? [h doubleValue] : 80.0;
+    }
+    return [super tableView:tableView heightForRowAtIndexPath:indexPath];
 }
 
 #pragma mark - 全局 plist 镜像（tweak 读同一物理文件）

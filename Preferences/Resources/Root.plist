@@ -90,7 +90,7 @@
 		</dict>
 		<dict>
 			<key>cell</key>
-			<string>PiPSliderCell</string>
+			<string>PSSliderCell</string>
 			<key>defaults</key>
 			<string>com.yxh41.pipbar</string>
 			<key>key</key>
@@ -110,7 +110,7 @@
 		</dict>
 		<dict>
 			<key>cell</key>
-			<string>PiPSliderCell</string>
+			<string>PSSliderCell</string>
 			<key>defaults</key>
 			<string>com.yxh41.pipbar</string>
 			<key>key</key>
