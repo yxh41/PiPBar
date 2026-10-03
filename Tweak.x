@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.25"
+#define PIP_BUILD_TAG @"v0.26"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -170,6 +170,7 @@ static double gMRRate = 0;           // playbackRate（1=播放中 0=暂停）
 static BOOL gSeekBusy = NO;          // 拖动/seek 进行中：暂停外推，别跟用户抢进度
 static double gDragTargetSec = 0;    // 拖动中的目标秒数
 static double gSeekGraceUntil = 0;   // 松手宽限期（墙上时间）：期内 gSeekBusy 保持，心跳不覆盖进度
+static double gSeekTargetSec = 0;    // 松手时 seek 的目标秒数（供宽限期后校验 App 是否真的跳过去）
 
 // v0.12：切歌「试探 → 校验 → 回退」状态机
 
@@ -252,6 +253,12 @@ static void pipMRRefresh(void) {
             if (!gSeekBusy) {           // 用户正在拖进度条 ⇒ 不覆盖，避免回跳
                 gMRDuration = dur; gMRElapsed = ela; gMRRate = rate;
                 gMRUpdatedAt = [[NSDate date] timeIntervalSinceReferenceDate];
+                // v0.26：宽限期过后的第一次上报 = 校验 seek 是否真的生效（差值为 0 附近才算成功）
+                if (gSeekTargetSec > 0.0) {
+                    PIPLog(@"seek 校验：目标 %.2fs，App 实报 %.2fs（差 %+.2fs）",
+                           gSeekTargetSec, ela, ela - gSeekTargetSec);
+                    gSeekTargetSec = 0.0;
+                }
                 // 进度条由心跳每帧 pipRefreshProgress 更新（它会读上面这几个全局量），
                 // 这里不碰 UI —— gInstalledFrame 在本函数之后才声明，不能在此引用。
             }
@@ -286,9 +293,16 @@ static void pipMRRefresh(void) {
 @property (nonatomic, strong) UILabel *timeLabel;
 @property (nonatomic, strong) UIPanGestureRecognizer *seekPan;
 @property (nonatomic, strong) UITapGestureRecognizer *seekTap;
-// v0.23：自由态（解除吸附）专用关闭按钮 —— 自由态下整块视频被壳接管，
+// v0.26：自由态（解除吸附）专用关闭按钮 —— 自由态下整块视频被壳接管，
 // 原生控制条（播放/还原/关闭）点不到，故在外框右上角加一个关闭入口。
-@property (nonatomic, strong) UIButton *closeButton;
+// ⚠️ 实现改为 **纯 CALayer**（底衬圆 + ✕ 描边）+ 一个 tap 手势：
+// v0.23~v0.25 用 UIButton 子视图，真机日志证明它拿到了有效 frame（{{320,8},{40,40}}）、
+// hidden=NO、也 bringSubviewToFront 过，但屏幕上就是不显示；而本壳的**图层**（进度条轨道/
+// 已播段/拇指）在同一环境下稳定渲染 ⇒ 改用与进度条同一条渲染通路，并把手势接进来。
+@property (nonatomic, strong) CAShapeLayer *closeBgLayer;    // 半透明圆底衬
+@property (nonatomic, strong) CAShapeLayer *closeXLayer;     // 白色 ✕（两条线）
+@property (nonatomic, assign) CGRect closeFrame;             // 关闭按钮命中区（本壳坐标系）
+@property (nonatomic, strong) UITapGestureRecognizer *closeTap;
 // v0.11：外框矩形（本壳坐标系，含底部黑边）—— 供 pointInside 扩展命中区用
 @property (nonatomic, assign) CGRect hitRect;
 // v0.15：拖动中（此时进度由手指决定，不被心跳覆盖）
@@ -356,7 +370,7 @@ static void pipApplyFreeMovePref(void) {
     gFreeMove = gFreePending;
     if (gFreePan != nil) gFreePan.enabled = gFreeMove;
     if (gFreePinch != nil) gFreePinch.enabled = gFreeMove;
-    if (gInstalledFrame != nil) gInstalledFrame.closeButton.hidden = !gFreeMove; // v0.23
+    if (gInstalledFrame != nil) [gInstalledFrame pipLayoutCloseButton];   // v0.26：图层显隐随 gFreeMove
     PIPLog(@"free-move %@（来自设置）", gFreeMove ? @"开" : @"关");
 }
 
@@ -525,21 +539,25 @@ static void pipSwizzlePointInsideOn(Class cls) {
         gFreePinch.delegate = self;
         [self addGestureRecognizer:gFreePinch];
 
-        // v0.23：自由态关闭按钮（右上角）。默认隐藏，仅 gFreeMove 时显示。
-        self.closeButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        [self.closeButton setTitle:@"✕" forState:UIControlStateNormal];
-        self.closeButton.titleLabel.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightMedium];
-        [self.closeButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-        self.closeButton.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
-        self.closeButton.layer.cornerRadius = 20.0;
-        // v0.25：加白色描边 —— 纯半透明圆在浅色画面上几乎看不见（真机反馈「没看到按钮」）
-        self.closeButton.layer.borderWidth = 1.5;
-        self.closeButton.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.9].CGColor;
-        self.closeButton.clipsToBounds = YES;
-        self.closeButton.hidden = YES;   // 仅自由态显示
-        [self.closeButton addTarget:self action:@selector(pipCloseAction:)
-                    forControlEvents:UIControlEventTouchUpInside];
-        [self addSubview:self.closeButton];
+        // v0.26：关闭按钮改纯图层渲染（圆底衬 + ✕ 描边），加入顺序在最后 ⇒ 位于所有图层之上
+        self.closeBgLayer = [CAShapeLayer layer];
+        self.closeBgLayer.fillColor = [UIColor colorWithWhite:0.05 alpha:0.7].CGColor;
+        self.closeBgLayer.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.92].CGColor;
+        self.closeBgLayer.lineWidth = 2.0;
+        self.closeBgLayer.hidden = YES;   // 仅自由态显示
+        [self.layer addSublayer:self.closeBgLayer];
+        self.closeXLayer = [CAShapeLayer layer];
+        self.closeXLayer.strokeColor = [UIColor colorWithWhite:1.0 alpha:0.95].CGColor;
+        self.closeXLayer.lineWidth = 2.5;
+        self.closeXLayer.fillColor = UIColor.clearColor.CGColor;
+        self.closeXLayer.lineCap = kCALineCapRound;
+        self.closeXLayer.hidden = YES;
+        [self.layer addSublayer:self.closeXLayer];
+        // 点按：独立 tap 手势，由 gestureRecognizerShouldBegin: 限定只认「落在关闭按钮上」
+        self.closeTap = [[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                action:@selector(pipCloseTap:)];
+        self.closeTap.delegate = self;
+        [self addGestureRecognizer:self.closeTap];
 
         // v0.16：三颗按钮已移除（切歌通道对短视频 App 无效，改用系统自带控制条）
         [self setNeedsLayout];
@@ -595,6 +613,11 @@ static void pipSwizzlePointInsideOn(Class cls) {
 // 新规则：进度条热区内归进度条，热区外归自由拖动，互不侵占。
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gr {
     if (gr == gFreeLongPress) return YES;
+    // v0.26：关闭按钮的 tap —— 只认「自由态 + 落在按钮命中区内」
+    if (gr == self.closeTap) {
+        if (!gFreeMove || CGRectIsEmpty(self.closeFrame)) return NO;
+        return CGRectContainsPoint(self.closeFrame, [gr locationInView:self]);
+    }
     if (gr == self.seekPan || gr == self.seekTap) {
         // 进度条手势只在热区内参与；热区外拒绝 begin，把手势位让出来
         if (CGRectGetWidth(self.trackRect) > 1.0) {
@@ -604,6 +627,9 @@ static void pipSwizzlePointInsideOn(Class cls) {
         return NO;
     }
     if (gr == gFreePan) {
+        // v0.26：从关闭按钮起手不要拖着窗口跑（按钮优先）
+        if (gFreeMove && !CGRectIsEmpty(self.closeFrame)
+            && CGRectContainsPoint(self.closeFrame, [gr locationInView:self])) return NO;
         // 热区内让给进度条（避免「拖进度条窗口跟着跑」），其余放行
         if (CGRectGetWidth(self.trackRect) > 1.0) {
             CGRect hot = CGRectInset(self.trackRect, -8.0, -20.0);
@@ -628,11 +654,13 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
     gFreeMove = !gFreeMove;
     gFreePan.enabled = gFreeMove;
     gFreePinch.enabled = gFreeMove;
-    self.closeButton.hidden = !gFreeMove;   // v0.23：仅自由态显示关闭按钮
-    [self pipLayoutCloseButton];            // 立即定位，避免依赖 layoutSubviews 时机导致不出现
-    PIPLog(@"close button %@ frame=%@（host=%@）",
-           gFreeMove ? @"显示" : @"隐藏", NSStringFromCGRect(self.closeButton.frame),
-           gVideoHost != nil ? NSStringFromClass(gVideoHost.class) : @"nil");
+    [self pipLayoutCloseButton];   // v0.26：图层显隐 + 定位（内部按 gFreeMove 决定）
+    [self.closeBgLayer setNeedsDisplay];
+    [self.closeXLayer setNeedsDisplay];
+    PIPLog(@"close button %@ frame=%@（host=%@ bgHidden=%d）",
+           gFreeMove ? @"显示" : @"隐藏", NSStringFromCGRect(self.closeFrame),
+           gVideoHost != nil ? NSStringFromClass(gVideoHost.class) : @"nil",
+           (int)self.closeBgLayer.hidden);
     // 自由态需要能接到拖动 ⇒ hitTest 必须放行视频区
     self.userInteractionEnabled = YES;
     [self setNeedsLayout];
@@ -647,10 +675,19 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
     gFreeMove = NO;
     if (gFreePan != nil) gFreePan.enabled = NO;
     if (gFreePinch != nil) gFreePinch.enabled = NO;
-    self.closeButton.hidden = YES;
+    self.closeBgLayer.hidden = YES;    // v0.26：按钮改图层
+    self.closeXLayer.hidden = YES;
     [self setNeedsLayout];
     PIPLog(@"close button tapped → 关闭画中画");
     pipStopPiP();
+}
+
+// v0.26：关闭按钮的 tap 手势（UIButton 移除后改由手势承接点按）
+- (void)pipCloseTap:(UITapGestureRecognizer *)gr {
+    if (!gFreeMove) return;
+    if (CGRectIsEmpty(self.closeFrame)) return;
+    if (!CGRectContainsPoint(self.closeFrame, [gr locationInView:self])) return;
+    [self pipCloseAction:nil];
 }
 
 // v0.23：关闭 PiP —— 多候选 selector 降级，覆盖 iOS 版本差异。
@@ -746,7 +783,7 @@ static NSString *pipTimeText(double sec) {
         gSeekBusy = NO;
     }
     // v0.23：关闭按钮位置每帧跟随视频矩形（不依赖 layoutSubviews 时机，确保解除吸附立即出现）
-    if (!self.closeButton.hidden) [self pipLayoutCloseButton];
+    if (gFreeMove) [self pipLayoutCloseButton];   // v0.26：自由态每帧跟随（图层版）
     BOOL haveDur = (gMRDuration > 1.0);
     // ⚠️ v0.15 真机修复：首帧 layoutSubviews 时 gMRDuration 还是 0 ⇒ trackRect 被置零；
     // 之后 MediaRemote 探到时长（dur=23.3）也不再触发布局 ⇒ 进度条永远不显示。
@@ -838,7 +875,11 @@ static NSString *pipTimeText(double sec) {
         }
         self.seeking = NO;
         // 进入宽限期：gSeekBusy 保持，心跳暂不覆盖进度（给 App 处理 seek 的时间，避免松手被旧进度拽回）
-        gSeekGraceUntil = [[NSDate date] timeIntervalSinceReferenceDate] + 1.2;
+        // v0.26：1.2s 太短 —— MR 每 2s 回报一次，宽限期一过就被「旧上报进度」拽回去，
+        // 于是「走一下、退一下」反复出现。延长到 3.5s（跨过约两个 MR 周期），
+        // 给 App 处理 seek 的时间，宽限期内进度稳定停在用户拖到的位置。
+        gSeekGraceUntil = [[NSDate date] timeIntervalSinceReferenceDate] + 3.5;
+        gSeekTargetSec = gDragTargetSec;   // 用全局量（target 是上面 if 块的局部变量，此处已出作用域）
         [self pipRefreshProgress];
         return;
     }
@@ -854,22 +895,33 @@ static NSString *pipTimeText(double sec) {
 // v0.23：关闭按钮布局（集中一处，layoutSubviews / pipRefreshProgress / pipToggleFree 都会调）
 // 用 gVideoHost 把视频矩形换算到本画布坐标，钉在右上角 8pt 内；自由态 hitTest 会先命中它。
 - (void)pipLayoutCloseButton {
-    if (self.closeButton == nil) return;
-    // ⚠️ v0.25：这里**不再**用 hidden 提前 return —— 旧写法导致按钮在 hidden=YES 期间
-    // 永远拿不到 frame（保持零尺寸），解除吸附那一帧即便取消隐藏也可能是个 0×0 的隐形按钮。
-    // 现在无条件按视频矩形定位，显隐只由 hidden 决定 ⇒ frame 恒有效。
+    if (self.closeBgLayer == nil) return;
     UIView *host = gVideoHost;
     if (host == nil || host.window == nil) return;
     CGRect vr = [host convertRect:host.bounds toView:self];
     CGFloat vrW = CGRectGetWidth(vr), vrH = CGRectGetHeight(vr);
     if (vrW < 8.0 || vrH < 8.0) return;
+
     CGFloat bs = 40.0;
     CGRect f = CGRectMake(CGRectGetMaxX(vr) - bs - 8.0, CGRectGetMinY(vr) + 8.0, bs, bs);
-    if (!CGRectEqualToRect(self.closeButton.frame, f)) {
-        self.closeButton.frame = f;
-        self.closeButton.layer.cornerRadius = bs / 2.0;
-    }
-    [self bringSubviewToFront:self.closeButton];
+    self.closeFrame = f;
+
+    BOOL show = gFreeMove;
+    self.closeBgLayer.hidden = !show;
+    self.closeXLayer.hidden = !show;
+    if (!show) return;
+
+    self.closeBgLayer.path =
+        [UIBezierPath bezierPathWithRoundedRect:f cornerRadius:bs / 2.0].CGPath;
+    // ✕：两条过圆心的短线（纯图层、无字体依赖，任何画面上都看得见）
+    CGPoint c = CGPointMake(CGRectGetMidX(f), CGRectGetMidY(f));
+    CGFloat r = 8.0;
+    UIBezierPath *xp = [UIBezierPath bezierPath];
+    [xp moveToPoint:CGPointMake(c.x - r, c.y - r)];
+    [xp addLineToPoint:CGPointMake(c.x + r, c.y + r)];
+    [xp moveToPoint:CGPointMake(c.x + r, c.y - r)];
+    [xp addLineToPoint:CGPointMake(c.x - r, c.y + r)];
+    self.closeXLayer.path = xp.CGPath;
 }
 
 // v0.24：后退 seek 兜底 —— Pegasus 原生 skipByInterval（action=1，负间隔=后退）。
