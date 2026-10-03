@@ -250,15 +250,21 @@ heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     [super viewWillAppear:animated];
     if (!_specifiers) [self specifiers];
 
-    // 兜底镜像：把各开关当前值从 suite 同步到全局文件
+    // v0.25 方向修正（真机实锤 barh=60）：旧代码把 NSUserDefaults suite 的值**覆盖写回**
+    // 全局 plist。但 roothide 下 suite 就是「设置」App 自己的容器副本、常是旧值 ⇒
+    // 用户把「底部高度」设成 28 后，下次进面板就被 suite 里的旧值冲回 60，tweak 也就读成 60。
+    // 权威源是全局 plist（tweak 只读它）⇒ 正确方向是【全局 plist → suite】，仅用于让 cell
+    // 显示到正确值；**绝不**反向覆盖全局 plist。
+    NSDictionary *global = pip_globalPrefs();
     NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.yxh41.pipbar"];
     for (PSSpecifier *spec in _specifiers) {
         NSString *key = [spec propertyForKey:@"key"];
         if (!key) continue;
-        id val = [d objectForKey:key];
-        if (val) [self pipMirrorPref:key value:val throttle:NO];
+        id val = global[key];
+        if (val) [d setObject:val forKey:key];
     }
-    pipPrefsLog(@"viewWillAppear: specifiers=%d", (int)_specifiers.count);
+    pipPrefsLog(@"viewWillAppear: specifiers=%d（全局 plist → suite 单向同步）",
+                (int)_specifiers.count);
 }
 
 @end

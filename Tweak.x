@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.24"
+#define PIP_BUILD_TAG @"v0.25"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -530,8 +530,11 @@ static void pipSwizzlePointInsideOn(Class cls) {
         [self.closeButton setTitle:@"✕" forState:UIControlStateNormal];
         self.closeButton.titleLabel.font = [UIFont systemFontOfSize:18.0 weight:UIFontWeightMedium];
         [self.closeButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-        self.closeButton.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.45];
-        self.closeButton.layer.cornerRadius = 18.0;
+        self.closeButton.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.55];
+        self.closeButton.layer.cornerRadius = 20.0;
+        // v0.25：加白色描边 —— 纯半透明圆在浅色画面上几乎看不见（真机反馈「没看到按钮」）
+        self.closeButton.layer.borderWidth = 1.5;
+        self.closeButton.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.9].CGColor;
         self.closeButton.clipsToBounds = YES;
         self.closeButton.hidden = YES;   // 仅自由态显示
         [self.closeButton addTarget:self action:@selector(pipCloseAction:)
@@ -555,7 +558,11 @@ static void pipSwizzlePointInsideOn(Class cls) {
         // v0.15：进度条命中区（trackRect 上下各扩 12pt 方便手指点中）也算命中，
         // 否则会被上面的「穿透」逻辑吞掉，拖不动。
         if (CGRectGetWidth(self.trackRect) > 1.0) {
-            CGRect hot = CGRectInset(self.trackRect, 0, -12.0);
+            // v0.25：热区必须与手势仲裁（gestureRecognizerShouldBegin:）**完全一致**。
+            // 旧代码这里是 (0, -12)，而仲裁用的是 (-8, -20) ⇒ 落在 ±12~±20 这一圈的触摸
+            // 既进不了进度条手势（hitTest 已 return nil，手势根本收不到），又被放给系统
+            // ⇒ 「拖进度条时窗口跟着动」（真机反馈）。两边统一成 (-8, -20)。
+            CGRect hot = CGRectInset(self.trackRect, -8.0, -20.0);
             if (CGRectContainsPoint(hot, point)) return self;
         }
         return nil;
@@ -623,6 +630,9 @@ shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other 
     gFreePinch.enabled = gFreeMove;
     self.closeButton.hidden = !gFreeMove;   // v0.23：仅自由态显示关闭按钮
     [self pipLayoutCloseButton];            // 立即定位，避免依赖 layoutSubviews 时机导致不出现
+    PIPLog(@"close button %@ frame=%@（host=%@）",
+           gFreeMove ? @"显示" : @"隐藏", NSStringFromCGRect(self.closeButton.frame),
+           gVideoHost != nil ? NSStringFromClass(gVideoHost.class) : @"nil");
     // 自由态需要能接到拖动 ⇒ hitTest 必须放行视频区
     self.userInteractionEnabled = YES;
     [self setNeedsLayout];
@@ -844,15 +854,21 @@ static NSString *pipTimeText(double sec) {
 // v0.23：关闭按钮布局（集中一处，layoutSubviews / pipRefreshProgress / pipToggleFree 都会调）
 // 用 gVideoHost 把视频矩形换算到本画布坐标，钉在右上角 8pt 内；自由态 hitTest 会先命中它。
 - (void)pipLayoutCloseButton {
-    if (self.closeButton == nil || self.closeButton.hidden) return;
+    if (self.closeButton == nil) return;
+    // ⚠️ v0.25：这里**不再**用 hidden 提前 return —— 旧写法导致按钮在 hidden=YES 期间
+    // 永远拿不到 frame（保持零尺寸），解除吸附那一帧即便取消隐藏也可能是个 0×0 的隐形按钮。
+    // 现在无条件按视频矩形定位，显隐只由 hidden 决定 ⇒ frame 恒有效。
     UIView *host = gVideoHost;
     if (host == nil || host.window == nil) return;
     CGRect vr = [host convertRect:host.bounds toView:self];
     CGFloat vrW = CGRectGetWidth(vr), vrH = CGRectGetHeight(vr);
     if (vrW < 8.0 || vrH < 8.0) return;
-    CGFloat bs = 36.0;
-    self.closeButton.frame = CGRectMake(CGRectGetMaxX(vr) - bs - 8.0,
-                                        CGRectGetMinY(vr) + 8.0, bs, bs);
+    CGFloat bs = 40.0;
+    CGRect f = CGRectMake(CGRectGetMaxX(vr) - bs - 8.0, CGRectGetMinY(vr) + 8.0, bs, bs);
+    if (!CGRectEqualToRect(self.closeButton.frame, f)) {
+        self.closeButton.frame = f;
+        self.closeButton.layer.cornerRadius = bs / 2.0;
+    }
     [self bringSubviewToFront:self.closeButton];
 }
 
@@ -1231,7 +1247,11 @@ static void pipInitPegasusOnce(void);
         if (videoHost == nil) return;
         gVideoHost = videoHost;   // 壳的矩形参照物（弱引用，几何就绪前会在 tick 里重解析）
         gContentVC = content;     // 供 tick 每帧重解析真正的视频宿主
-        gPegasusVC = self;        // self 即 PGPictureInPictureViewController，发 Pegasus 命令用
+        // ⚠️ v0.25 修正：这里的 self 是 **SBPIPContainerViewController**（容器），它不响应
+        // handleCommand:；真正能收 Pegasus 命令的是 content（真机日志实锤 contentVC=
+        // PGPictureInPictureViewController）。v0.24 错写成 self ⇒ 后退 skipByInterval 兜底
+        // 全部报「PGPictureInPictureViewController 实例不可用」⇒ 后退 seek 彻底失效。
+        gPegasusVC = content;     // content 即 PGPictureInPictureViewController
         pipInitPegasusOnce();   // content 已实例化 ⇒ Pegasus 必然已加载，此时挂它的钩子最稳
         pipDumpHierarchy(content.view, @"CONTENT-TREE");
 
