@@ -26,9 +26,9 @@
    |---|---|---|
    | 启用 | 开 | 关掉后完全不注入，等于没装 |
    | 显示外框 | 开 | 圆角「手机壳」：顶/左右同宽 |
-   | 显示控制按钮 | 开 | 底部三颗：上一曲 / 播放暂停 / 下一曲 |
-   | 外框宽度 | 8 | 4–24 pt（v0.5 由 12 改 8：顶/左右更细） |
-   | 底部高度 | 40 | 28–80 pt，比左右宽的那条 |
+   | 显示控制按钮 | 开 | 底部三颗：上一曲(−10s 快退) / 播放暂停 / 下一曲(+10s 快进) |
+   | 外框宽度 | 8 | 4–24 pt（v0.5 由 12 改 8：顶/左右更细）。滑块右侧实时显示当前值 |
+   | 底部高度 | 40 | 28–80 pt，比左右宽的那条。滑块右侧实时显示当前值 |
    | 文件日志 | 开 | 装完 respring 即有 `/var/mobile/Library/Logs/PiPBar.log` |
    | 调试日志 | 关 | 额外打 `HIER` 视图层级树（排查画错位时用） |
 
@@ -53,8 +53,9 @@
 
 ## 已知限制
 
-- 播放/暂停已可用；**上一曲 / 下一曲待 v0.6**，需要真机 `CMD playbackAction=N` 日志
-  确定 Pegasus 的 action 枚举值后接通（目前点这两颗只打日志，并 dump `PGCMD` 方法表辅助）。
+- 播放/暂停、上一曲/下一曲（±10s 快退快进）均已可用（v0.7 接通，基于 PGCMD-META
+  实锤的 `commandForPlaybackAction:associatedDoubleValue:`）。画中画无曲目概念，
+  左右键做快退/快进而非切歌。
 - 只支持系统原生 PiP，App 内自建的假画中画不在射程内。
 - roothide 下设置面板走「编译型 PreferenceLoader bundle + 全局 plist 直写桥」
   （绕过 per-app NSUserDefaults 容器隔离，SpringBoard 才能读到）。
@@ -95,6 +96,22 @@
   另：设置面板两个滑块写明作用 + min/max 端点数值 + 标题带当前值；新增 `PGCMD-META`
   方法表 dump（class_copyMethodList 不含类方法，`+commandForXxx:` 工厂在元类上）；
   真机日志实锤系统快退/快进 = `playbackAction=1 + dict[6]=±10`，v0.7 接 seek。
+- v0.7：三修 ——
+  ① **外框又消失**（v0.6 回归）：v0.6 删除 CADisplayLink 心跳后，host 重解析只留在
+     `layoutSubviews`，而 PiP 视频层尺寸变化**不触发父 view 重布局** → `layoutSubviews`
+     不被调用 → `pipPickHostView` 永不运行 → host 卡零尺寸 → 外框永不重画
+     （日志 `videoRect={{0,0},{0,0}}` 印证）。修：加回「无卡顿版」心跳 `PIPSyncSink.tick`——
+     每帧算当前视频矩形，与 `gLastVR` 不等才 `setNeedsLayout`；拖动时窗口移动但画布局部
+     几何不变 ⇒ 不重画 ⇒ 不卡（与 v0.6 卡顿根因不同：v0.6 是每帧强制 layout）。`loadView`
+     安装壳后调用 `pipEnsureSyncLink()`。
+  ② **滑块仍无数值**（v0.6 回归）：私有 `PSSliderCell` 不渲染当前值，且 `setPreferenceValue:`
+     在拖动中每帧触发、用 reload 刷新标题会打断手势；`spec.name` 改法 roothide 下不刷新单元格。
+     修：新增 `PiPBarSliderCell`（PSSliderCell 子类），右上角自绘 UILabel 实时显示「X pt」，
+     直接监听滑块 `valueChanged` 更新，零 reload、不打断拖动。控制器 `specifiers` 里为
+     FrameWidth/BarHeight 注册 `cellClass`。
+  ③ **上一曲/下一曲接通**：`frame.onTap` 的 tag1/tag3 发 `action=1 + double=∓10`
+     （上一曲 −10s / 下一曲 +10s）到 `handleCommand:`，脚注同步标注快退快进语义。
+  构建：roothide theos，`-Werror`，无废弃 UIKit API。
 
 ## 设置
 

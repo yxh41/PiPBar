@@ -7,9 +7,15 @@
 
 #import "PiPBarSliderCell.h"
 #import <UIKit/UIKit.h>
+#import <Preferences/PSSpecifier.h>
 
-// PSSliderCell 头未必声明 -value，补声明以通过 -Werror
-@interface PSSliderCell ()
+// 本 theos SDK 的 Preferences 私有框架不含 PSSliderCell.h，前向声明 + 类别补齐所需方法，
+// 既让子类化通过编译，也避免 import 缺失头触发 fatal error（-Werror）。
+@class PSSliderCell;
+@interface PSSliderCell (PIPInit)
+- (instancetype)initWithStyle:(UITableViewCellStyle)style
+              reuseIdentifier:(NSString *)ri
+                    specifier:(PSSpecifier *)spec;
 - (float)value;
 @end
 
