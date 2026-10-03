@@ -36,7 +36,7 @@ static const void *kPiPSliderPrefKey  = &kPiPSliderPrefKey;    // 属于哪个�
 static const void *kPiPSliderCellKey  = &kPiPSliderCellKey;    // 记住所属 cell（弱）
 
 // 设置面板自己的文件日志（独立文件，方便与 tweak 日志一起回传）
-static void pipPrefsLog(NSString *line) {
+static void pipPrefsLogImpl(NSString *line) {
     @try {
         NSString *path = @"/var/mobile/Library/Logs/PiPBarPrefs.log";
         NSDateFormatter *df = [[NSDateFormatter alloc] init];
@@ -53,6 +53,9 @@ static void pipPrefsLog(NSString *line) {
         NSLog(@"[PiPBarPrefs] %@", line);
     } @catch (NSException *e) { /* 忽略 */ }
 }
+
+// 变参包装（与 tweak 侧 PIPLog 同风格）
+#define pipPrefsLog(fmt, ...) pipPrefsLogImpl([NSString stringWithFormat:fmt, ##__VA_ARGS__])
 
 @implementation PiPBarSettingsController {
     NSTimeInterval _lastNotify;
