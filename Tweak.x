@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.14"
+#define PIP_BUILD_TAG @"v0.15"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -46,6 +46,7 @@ static CGFloat gFrameW = 8.0;     // 顶/左右边框宽（用户反馈 12 太�
 static CGFloat gBarH = 40.0;      // 底部控制条高
 static BOOL gExtendHit = YES;        // 扩展命中区：让壳外/底部黑边也能接收触摸（按钮放黑边的前提）
 static int gButtonAction = 0;        // 0=自动(探测切歌) 1=强制切歌(不回退) 2=始终 ±10s
+static BOOL gShowBarProgress = YES;  // 显示底部可拖动进度条
 
 // roothide per-app 容器隔离：Settings 里 CFPreferences 写的域，SpringBoard 读不到
 // （MapAdKiller/Oback 双双踩实）。范式同款：全局 plist 文件直读，两个进程命中同一物理文件。
@@ -66,6 +67,7 @@ static void pipReadPrefs(void) {
     if ((v = pipPref(@"DebugLog")) != nil) gDebugLog = [v boolValue];
     if ((v = pipPref(@"ExtendHit")) != nil) gExtendHit = [v boolValue];
     if ((v = pipPref(@"ButtonAction")) != nil) gButtonAction = [v intValue];
+    if ((v = pipPref(@"ShowProgress")) != nil) gShowBarProgress = [v boolValue];
     if ((v = pipPref(@"FrameWidth")) != nil) {
         CGFloat f = [v floatValue];
         if (f >= 2.0 && f <= 30.0) gFrameW = f;
@@ -143,6 +145,8 @@ static Boolean (*gMRSendCommand)(int, id) = NULL;
 static void (*gMRGetNowPlayingInfo)(dispatch_queue_t, void (^)(CFDictionaryRef)) = NULL;
 static void (*gMRKeepAlive)(void) = NULL;
 static void (*gMRGetAppPID)(dispatch_queue_t, void (^)(int)) = NULL;
+static void (*gMRSetElapsedTime)(double) = NULL;   // ★ 拖动进度条：官方 seek 接口
+static BOOL (*gMRGetPlaybackSpeed)(void) = NULL;
 
 // 能力判据
 static BOOL gMRIsMusicApp = NO;      // kMRMediaRemoteNowPlayingInfoIsMusicApp
@@ -153,6 +157,13 @@ static NSString *gMRUniqueID = nil; // 用于切歌后校验是否真的换了�
 static int gMRAppPID = 0;            // MediaRemote 当前 NowPlaying 客户端的 pid（>0 = 系统认得这个 App）
 static double gMRQueryAt = 0;
 static NSString *gMRLastKeys = nil;  // 上次打印的 now playing 键集（变化时才打日志）
+// v0.15 进度条状态：MediaRemote 每秒回报进度（实测抖音 keys 里带 Duration/ElapsedTime）
+static double gMRDuration = 0;       // 总时长（秒）；0 = 未知/直播流 ⇒ 隐藏进度条
+static double gMRElapsed = 0;        // 当前进度（秒）
+static double gMRUpdatedAt = 0;      // 上次更新的墙上时间（用于线性外推，避免每秒跳一下）
+static double gMRRate = 0;           // playbackRate（1=播放中 0=暂停）
+static BOOL gSeekBusy = NO;          // 拖动/seek 进行中：暂停外推，别跟用户抢进度
+static double gDragTargetSec = 0;    // 拖动中的目标秒数
 
 // v0.12：切歌「试探 → 校验 → 回退」状态机
 static BOOL gTrackPending = NO;      // 已发切歌命令，等待校验
@@ -166,6 +177,9 @@ static NSString *const kMRKeyProhibitsSkip = @"kMRMediaRemoteNowPlayingInfoProhi
 static NSString *const kMRKeyTitle        = @"kMRMediaRemoteNowPlayingInfoTitle";
 static NSString *const kMRKeyUniqueID     = @"kMRMediaRemoteNowPlayingInfoUniqueIdentifier";
 static NSString *const kMRKeyContentItem  = @"kMRMediaRemoteNowPlayingInfoContentItemIdentifier";
+static NSString *const kMRKeyDuration     = @"kMRMediaRemoteNowPlayingInfoDuration";
+static NSString *const kMRKeyElapsed      = @"kMRMediaRemoteNowPlayingInfoElapsedTime";
+static NSString *const kMRKeyRate         = @"kMRMediaRemoteNowPlayingInfoPlaybackRate";
 
 static void pipEnsureMediaRemote(void) {
     if (gMRLib != NULL) return;   // 已加载或已标记失败
@@ -185,9 +199,14 @@ static void pipEnsureMediaRemote(void) {
     gMRKeepAlive = (void (*)(void))dlsym(gMRLib, "MRMediaRemoteKeepAlive");
     if (gMRKeepAlive != NULL) gMRKeepAlive();
     gMRGetAppPID = (void (*)(dispatch_queue_t, void (^)(int)))dlsym(gMRLib, "MRMediaRemoteGetNowPlayingApplicationPID");
-    PIPLog(@"MR loaded: send=%p getInfo=%p keepAlive=%p getPID=%p（keepAlive=0x0 属 iOS 16 正常，不影响发命令）",
+    // v0.15：拖动进度条所需的两个符号（★ 官方 seek 接口，能真正定位播放位置）
+    gMRSetElapsedTime = (void (*)(double))dlsym(gMRLib, "MRMediaRemoteSetElapsedTime");
+    gMRGetPlaybackSpeed = (BOOL (*)(void))dlsym(gMRLib, "MRMediaRemoteGetNowPlayingApplicationPlaybackState");
+    PIPLog(@"MR loaded: send=%p getInfo=%p keepAlive=%p getPID=%p\n"
+           "        seek(setElapsedTime)=%p getPlaybackState=%p（keepAlive=0x0 属 iOS 16 正常）",
            (void *)gMRSendCommand, (void *)gMRGetNowPlayingInfo,
-           (void *)gMRKeepAlive, (void *)gMRGetAppPID);
+           (void *)gMRKeepAlive, (void *)gMRGetAppPID,
+           (void *)gMRSetElapsedTime, (void *)gMRGetPlaybackSpeed);
 }
 
 // 拉一次 NowPlaying 信息（异步；只取需要的几个标量，不持有 CFDictionary ⇒ 无所有权坑）
@@ -208,6 +227,7 @@ static void pipMRRefresh(void) {
         BOOL music = NO, hasList = NO, prohibit = NO;
         NSString *title = nil, *uid = nil;
         NSString *keys = nil;
+        double dur = 0, ela = 0, rate = 0;
         if (info != NULL) {
             NSDictionary *d = (__bridge NSDictionary *)info;
             music    = [d[kMRKeyIsMusicApp] boolValue];
@@ -218,19 +238,29 @@ static void pipMRRefresh(void) {
             // 校验切歌是否生效时它才是可靠的「条目身份」标识。
             uid      = d[kMRKeyUniqueID] ?: d[kMRKeyContentItem];
             keys     = [d.allKeys componentsJoinedByString:@","];
+            // v0.15：进度条数据源（实测抖音 keys 里确实带这三个）
+            dur      = [d[kMRKeyDuration] doubleValue];
+            ela      = [d[kMRKeyElapsed] doubleValue];
+            rate     = [d[kMRKeyRate] doubleValue];
         }
         NSString *kt = keys, *ti = title, *ui = uid;   // block 捕获（ARC 强引用）
         dispatch_async(dispatch_get_main_queue(), ^{
             gMRIsMusicApp = music; gMRHasPlaylist = hasList;
             gMRProhibitsSkip = prohibit; gMRTitle = ti; gMRUniqueID = ui;
+            if (!gSeekBusy) {           // 用户正在拖进度条 ⇒ 不覆盖，避免回跳
+                gMRDuration = dur; gMRElapsed = ela; gMRRate = rate;
+                gMRUpdatedAt = [[NSDate date] timeIntervalSinceReferenceDate];
+                [gInstalledFrame setNeedsLayout];
+            }
             // v0.12：首次拿到（或变化时）打印原始键集 + pid —— 用来判定
             // 「MediaRemote 到底看不看得见这个 App」这个根本问题
             // ⚠️ 判重必须用 isEqualToString:（两侧都给非 nil），否则 keys 为 nil 时
             // [nil isEqualToString:] 返回 NO ⇒ 判重永远失效 ⇒ 每 2 秒刷屏（曾刷出 3.4MB 日志）
             if (![kt ?: @"" isEqualToString:(gMRLastKeys ?: @"")]) {
                 gMRLastKeys = kt;
-                PIPLog(@"MR info: pid=%d music=%d list=%d prohibit=%d title=%@ uid=%@ keys={%@}",
-                       gMRAppPID, music, hasList, prohibit, ti ?: @"-", ui ?: @"-", kt ?: @"(空)");
+                PIPLog(@"MR info: pid=%d music=%d list=%d prohibit=%d dur=%.1f ela=%.1f rate=%.2f title=%@ uid=%@ keys={%@}",
+                       gMRAppPID, music, hasList, prohibit, dur, ela, rate,
+                       ti ?: @"-", ui ?: @"-", kt ?: @"(空)");
             }
         });
     });
@@ -317,10 +347,20 @@ static int gTickN = 0;   // 真宿主未找到时的重扫节流计数（每 5 �
 @property (nonatomic, strong) CAShapeLayer *caseLayer;
 @property (nonatomic, strong) CAShapeLayer *edgeLayer;
 @property (nonatomic, strong) CAShapeLayer *barLayer;
-@property (nonatomic, copy) void (^onTap)(NSInteger tag);
+// v0.15 进度条：轨道 / 已播放 / 拖动拇指 / 时间标签 / 拖动手势
+@property (nonatomic, strong) CAShapeLayer *trackLayer;
+@property (nonatomic, strong) CAShapeLayer *fillLayer;
+@property (nonatomic, strong) CALayer *thumbLayer;
+@property (nonatomic, strong) UILabel *timeLabel;
+@property (nonatomic, strong) UIPanGestureRecognizer *seekPan;
+@property (nonatomic, strong) UITapGestureRecognizer *seekTap;
 // v0.11：外框矩形（本壳坐标系，含底部黑边）—— 供 pointInside 扩展命中区用
 @property (nonatomic, assign) CGRect hitRect;
+// v0.15：拖动中（此时进度由手指决定，不被心跳覆盖）
+@property (nonatomic, assign) BOOL seeking;
+@property (nonatomic, assign) CGRect trackRect;
 - (void)pipSelfHeal;
+- (void)pipRefreshProgress;
 @end
 
 // —— 命中区扩展（v0.11）——
@@ -450,6 +490,35 @@ static UIImage *pipIcon(BOOL playing) {
         self.barLayer.fillColor = [UIColor colorWithWhite:0.0 alpha:0.38].CGColor;
         self.barLayer.masksToBounds = NO;
         [self.layer addSublayer:self.barLayer];
+        // v0.15 进度条：轨道（半透明细线）+ 已播放段（白色高亮）
+        self.trackLayer = [CAShapeLayer layer];
+        self.trackLayer.fillColor = [UIColor colorWithWhite:1.0 alpha:0.22].CGColor;
+        self.trackLayer.masksToBounds = NO;
+        [self.layer addSublayer:self.trackLayer];
+        self.fillLayer = [CAShapeLayer layer];
+        self.fillLayer.fillColor = [UIColor colorWithWhite:1.0 alpha:0.92].CGColor;
+        self.fillLayer.masksToBounds = NO;
+        [self.layer addSublayer:self.fillLayer];
+        self.thumbLayer = [CALayer layer];
+        self.thumbLayer.backgroundColor = UIColor.whiteColor.CGColor;
+        self.thumbLayer.cornerRadius = 5.5;
+        self.thumbLayer.hidden = YES;      // 平时隐藏，拖动/点按时才显示
+        self.thumbLayer.masksToBounds = YES;
+        [self.layer addSublayer:self.thumbLayer];
+        // 时间标签：拖动时显示「1:23 / 5:07」
+        self.timeLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        self.timeLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.0 weight:UIFontWeightMedium];
+        self.timeLabel.textColor = UIColor.whiteColor;
+        self.timeLabel.textAlignment = NSTextAlignmentCenter;
+        self.timeLabel.hidden = YES;
+        [self addSubview:self.timeLabel];
+        // 拖动 / 点按手势（挂在壳上，靠 trackRect 判定是否落在进度条上）
+        self.seekPan = [[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                                action:@selector(pipSeekGesture:)];
+        self.seekTap = [[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                action:@selector(pipSeekGesture:)];
+        [self addGestureRecognizer:self.seekPan];
+        [self addGestureRecognizer:self.seekTap];
         // 三颗按钮：壳的子视图（壳实测渲染位置正确；按钮在窗口边界内 ⇒ 必然可点）
         // v0.10：左右键恢复切歌语义（backward.end.fill / forward.end.fill）——
         // 走 MediaRemote 切歌通道，App 不支持切歌时自动回退 ±10s 快退快进。
@@ -483,10 +552,17 @@ static UIImage *pipIcon(BOOL playing) {
     if (self.onTap != nil) self.onTap(sender.tag);
 }
 
-// 整层透明铺在容器上：只有摸到按钮才接管，其余穿透（保住 PiP 原生拖动/单击/双击手势）
+// 整层透明铺在容器上：只有摸到按钮/进度条才接管，其余穿透（保住 PiP 原生拖动/单击/双击手势）
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
-    return (hit == self) ? nil : hit;
+    if (hit == self) return nil;
+    // v0.15：进度条命中区（trackRect 上下各扩 12pt 方便手指点中）也算命中，
+    // 否则会被上面的「穿透」逻辑吞掉，拖不动。
+    if (hit == nil && CGRectGetWidth(self.trackRect) > 1.0) {
+        CGRect hot = CGRectInset(self.trackRect, 0, -12.0);
+        if (CGRectContainsPoint(hot, point)) return self;
+    }
+    return hit;
 }
 
 // v0.11：本壳画到窗口外（底部黑边）的那部分默认收不到触摸 —— 这里把 hitRect
@@ -504,6 +580,117 @@ static UIImage *pipIcon(BOOL playing) {
         && !CGRectEqualToRect(self.frame, sup.bounds)) {
         self.frame = sup.bounds;   // 触发下一轮 layoutSubviews，届时已相等，不会死循环
     }
+}
+
+#pragma mark - v0.15 进度条
+
+// 秒 → mm:ss
+static NSString *pipTimeText(double sec) {
+    if (sec < 0 || sec != sec) return @"--:--";
+    NSInteger s = (NSInteger)sec;
+    if (s >= 3600) {
+        return [NSString stringWithFormat:@"%ld:%02ld:%02ld",
+                (long)(s / 3600), (long)((s % 3600) / 60), (long)(s % 60)];
+    }
+    return [NSString stringWithFormat:@"%ld:%02ld", (long)(s / 60), (long)(s % 60)];
+}
+
+// 当前应显示的进度秒数：拖动中由手指决定；否则用上报值 + 线性外推（避免每秒跳一格）
+- (double)pipCurrentSeconds {
+    if (self.seeking) return self.trackRect.width > 0
+        ? gDragTargetSec : 0;
+    if (gMRDuration <= 0) return 0;
+    double e = gMRElapsed;
+    if (gMRRate > 0.05 && gMRUpdatedAt > 0) {
+        e += ([[NSDate date] timeIntervalSinceReferenceDate] - gMRUpdatedAt) * gMRRate;
+    }
+    if (e < 0) e = 0;
+    if (e > gMRDuration) e = gMRDuration;
+    return e;
+}
+
+// 只更新进度条三件套（不触发布局，放在心跳里每帧跑也便宜）
+- (void)pipRefreshProgress {
+    BOOL haveDur = (gMRDuration > 1.0);
+    BOOL show = haveDur && !gExpandedUI && gEnabled && gShowBarProgress;
+    self.trackLayer.hidden = !show;
+    self.fillLayer.hidden = !show;
+    if (!show) {
+        self.thumbLayer.hidden = YES;
+        self.timeLabel.hidden = YES;
+        return;
+    }
+    CGFloat w = CGRectGetWidth(self.trackRect);
+    if (w < 1.0) return;
+
+    double cur = [self pipCurrentSeconds];
+    CGFloat ratio = (CGFloat)(cur / gMRDuration);
+    if (ratio < 0) ratio = 0;
+    if (ratio > 1) ratio = 1;
+    CGFloat fw = w * ratio;
+
+    CGRect tr = self.trackRect;
+    self.fillLayer.path =
+        [UIBezierPath bezierPathWithRoundedRect:CGRectMake(tr.origin.x, tr.origin.y, fw, CGRectGetHeight(tr))
+                                    cornerRadius:CGRectGetHeight(tr) / 2.0].CGPath;
+    // 拇指：拖动/点按时才显示
+    self.thumbLayer.hidden = !self.seeking;
+    if (self.seeking) {
+        CGFloat d = 11.0;
+        self.thumbLayer.frame = CGRectMake(tr.origin.x + fw - d / 2.0,
+                                           CGRectGetMidY(tr) - d / 2.0, d, d);
+    }
+    // 时间标签：拖动时显示在进度条上方
+    self.timeLabel.hidden = !self.seeking;
+    if (self.seeking) {
+        self.timeLabel.text = [NSString stringWithFormat:@"%@ / %@",
+                               pipTimeText(cur), pipTimeText(gMRDuration)];
+        CGSize sz = [self.timeLabel sizeThatFits:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)];
+        CGFloat tw = MAX(sz.width + 12.0, 74.0), th = 18.0;
+        CGFloat tx = CGRectGetMinX(tr) + fw - tw / 2.0;
+        tx = MAX(CGRectGetMinX(tr) - 14.0, MIN(tx, CGRectGetMaxX(tr) + 14.0 - tw));
+        self.timeLabel.frame = CGRectMake(tx, CGRectGetMinY(tr) - th - 4.0, tw, th);
+    }
+}
+
+// 拖动/点按 → 计算目标秒数 → 拖动中实时显示，松手才真正 seek
+- (void)pipSeekGesture:(UIGestureRecognizer *)gr {
+    CGFloat w = CGRectGetWidth(self.trackRect);
+    if (w < 1.0 || gMRDuration <= 0) return;
+    CGPoint p = [gr locationInView:self];
+
+    if (gr.state == UIGestureRecognizerStateBegan) {
+        self.seeking = YES;
+        gSeekBusy = YES;
+        [self pipRefreshProgress];       // 先显示拇指/时间标签
+    }
+    if (gr.state == UIGestureRecognizerStateEnded
+        || gr.state == UIGestureRecognizerStateCancelled
+        || gr.state == UIGestureRecognizerStateFailed) {
+        if (self.seeking) {
+            // 松手才 seek：MRMediaRemoteSetElapsedTime 频繁调用会卡顿
+            if (gMRSetElapsedTime != NULL) {
+                gMRSetElapsedTime(gDragTargetSec);
+                PIPLog(@"seek -> elapsed=%.2fs / %.2fs（%.0f%%）",
+                       gDragTargetSec, gMRDuration, gMRDuration > 0 ? gDragTargetSec / gMRDuration * 100.0 : 0);
+            } else {
+                PIPLog(@"MRMediaRemoteSetElapsedTime 不可用，无法 seek");
+            }
+            gMRElapsed = gDragTargetSec;   // 立即本地校准，避免拉回旧位置
+            gMRUpdatedAt = [[NSDate date] timeIntervalSinceReferenceDate];
+        }
+        self.seeking = NO;
+        gSeekBusy = NO;
+        [self pipRefreshProgress];
+        return;
+    }
+
+    // 拖动中：x → ratio → 秒
+    CGFloat r = (p.x - CGRectGetMinX(self.trackRect)) / w;
+    if (r < 0) r = 0;
+    if (r > 1) r = 1;
+    gDragTargetSec = r * gMRDuration;
+    [self pipRefreshProgress];
 }
 
 // 全部按【当前视频矩形 + 当前偏好】重算 —— 偏好热更新也走这里（setNeedsLayout）
@@ -538,7 +725,6 @@ static UIImage *pipIcon(BOOL playing) {
                               vrW + sw * 2.0, vrH + sw + bh);
     // 命中区 = 整个外框（含底部黑边）—— 供 pointInside 扩展用
     self.hitRect = outer;
-
     // 圆角：内洞贴视频自身圆角，外圈随边宽外扩
     CGFloat innerR = host.layer.cornerRadius;
     if (innerR < 2.0 || innerR > 40.0) innerR = 16.0;
@@ -558,9 +744,7 @@ static UIImage *pipIcon(BOOL playing) {
         self.edgeLayer.path = nil;
     }
 
-    // —— 按钮条：放进【底部黑边】（v0.11）——
-    // 配合 pointInside 命中区扩展，底部黑边里的按钮现在真的可点（v0.5 的死结已破）。
-    // 之前不敢放这里，是因为窗口外收不到触摸；现在壳/画布/窗口三层都扩展了命中区。
+    // —— 底部黑边：上排进度条 + 下排三颗按钮（v0.15）——
     BOOL showBar = gShowButtons && !gExpandedUI;
     CGFloat inset = 8.0;
     CGRect barRect = CGRectZero;
@@ -568,16 +752,31 @@ static UIImage *pipIcon(BOOL playing) {
     if (showBar) {
         // 黑边区 = 视频下沿往下 bh（bh 由设置控制，默认 40，最小 28）
         CGFloat chin = MAX(bh, 26.0);
-        CGFloat capH = MAX(chin - 6.0, 18.0);
-        barRect = CGRectMake(CGRectGetMinX(vr) + inset,
-                             CGRectGetMaxY(vr) + (chin - capH) / 2.0,
-                             vrW - inset * 2.0, capH);
+        // 有进度条时把黑边分两行：进度条占上沿，按钮占剩余空间
+        CGFloat progH = (gShowBarProgress && gMRDuration > 1.0) ? 3.0 : 0.0;
+        CGFloat capH = MAX(chin - 6.0 - progH - 6.0, 18.0);
+        CGFloat capY = CGRectGetMaxY(vr) + (chin - progH - 6.0 - capH) / 2.0 + (progH > 0 ? 3.0 : 0.0);
+        barRect = CGRectMake(CGRectGetMinX(vr) + inset, capY, vrW - inset * 2.0, capH);
         self.barLayer.path =
             [UIBezierPath bezierPathWithRoundedRect:barRect
                                        cornerRadius:CGRectGetHeight(barRect) / 2.0].CGPath;
+
+        // 进度条轨道：黑边最上沿，横向近乎铺满
+        if (progH > 0) {
+            CGFloat ty = CGRectGetMaxY(vr) + 5.0;
+            self.trackRect = CGRectMake(CGRectGetMinX(vr) + inset, ty,
+                                        vrW - inset * 2.0, progH);
+            self.trackLayer.path =
+                [UIBezierPath bezierPathWithRoundedRect:self.trackRect
+                                           cornerRadius:progH / 2.0].CGPath;
+        } else {
+            self.trackRect = CGRectZero;
+        }
     } else {
         self.barLayer.path = nil;
+        self.trackRect = CGRectZero;
     }
+    [self pipRefreshProgress];
 
     CGFloat xs[3] = {0.22, 0.50, 0.78};
     CGFloat btnH = MIN(30.0, MAX(CGRectGetHeight(barRect) - 4.0, 18.0));
@@ -637,6 +836,8 @@ static UIImage *pipIcon(BOOL playing) {
     pipEnsureMediaRemote();
     pipMRRefresh();
     pipVerifyTrackSkip();   // v0.12：切歌后 1.5s 校验，没换条目就自动补 ±10s
+    // v0.15：每帧轻量刷新进度条（只改三个 layer 的 path/frame，不做布局，开销极小）
+    [gInstalledFrame pipRefreshProgress];
 
     // v0.11：装壳时若还没进窗口（canvas.window == nil），这里补 swizzle PiP 窗口
     if (gExtendHit && gInstalledFrame != nil) {
