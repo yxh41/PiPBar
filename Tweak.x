@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.12"
+#define PIP_BUILD_TAG @"v0.13"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -165,6 +165,7 @@ static NSString *const kMRKeyTotalTracks  = @"kMRMediaRemoteNowPlayingInfoTotalT
 static NSString *const kMRKeyProhibitsSkip = @"kMRMediaRemoteNowPlayingInfoProhibitsSkip";
 static NSString *const kMRKeyTitle        = @"kMRMediaRemoteNowPlayingInfoTitle";
 static NSString *const kMRKeyUniqueID     = @"kMRMediaRemoteNowPlayingInfoUniqueIdentifier";
+static NSString *const kMRKeyContentItem  = @"kMRMediaRemoteNowPlayingInfoContentItemIdentifier";
 
 static void pipEnsureMediaRemote(void) {
     if (gMRLib != NULL) return;   // 已加载或已标记失败
@@ -213,7 +214,9 @@ static void pipMRRefresh(void) {
             hasList  = [d[kMRKeyTotalTracks] doubleValue] > 1.0;
             prohibit = [d[kMRKeyProhibitsSkip] boolValue];
             title    = d[kMRKeyTitle];
-            uid      = d[kMRKeyUniqueID];
+            // 短视频类 App（抖音等）没有 UniqueIdentifier，但有 ContentItemIdentifier ——
+            // 校验切歌是否生效时它才是可靠的「条目身份」标识。
+            uid      = d[kMRKeyUniqueID] ?: d[kMRKeyContentItem];
             keys     = [d.allKeys componentsJoinedByString:@","];
         }
         NSString *kt = keys, *ti = title, *ui = uid;   // block 捕获（ARC 强引用）
@@ -231,10 +234,14 @@ static void pipMRRefresh(void) {
     });
 }
 
-// 能否试切歌：MediaRemote 没有 SupportsNextTrack 能力键，判据从宽——
-// 只要 mediaserverd 认得当前 NowPlaying 客户端（pid>0）或它报了音乐/播放列表，就值得一试。
+// 能否试切歌 —— v0.13 真机实测后收紧判据（这条结论有数据支撑，不再是推测）：
+// MediaRemote 探测日志证明：短视频类 App（抖音，pid=28085）**完整注册了 NowPlaying**
+// （标题/作者/封面/时长/ContentItemIdentifier 全有），但 music=0、TotalTrackCount 不存在，
+// 连发 kMRNextTrack 十几次、1.5s 内 title 恒定不变 ⇒ **App 根本没实现 nextTrack handler**。
+// 结论：切歌能力只存在于「音乐 App / 有播放列表」的场景。
+// 对短视频类 App 直接走 ±10s 快退快进，不再浪费 1.5s 试探（用户体感更跟手）。
 static BOOL pipMRCanTrackSkip(void) {
-    return gMRAppPID > 0 || gMRIsMusicApp || gMRHasPlaylist;
+    return gMRIsMusicApp || gMRHasPlaylist;
 }
 
 // 发切歌命令并进入「等待校验」状态；返回 YES 表示已尝试（后续由 tick 校验/回退）

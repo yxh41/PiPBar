@@ -122,10 +122,37 @@ static void pipPrefsLogImpl(NSString *line) {
     return @"BarHeight";
 }
 
+// v0.13：roothide 下 -[PSListController tableView] 返回 nil（日志实证
+// `bind: tableView 为 nil`），这是 v0.11/v0.12 滑块数值不刷新的真凶。
+// 改为多重兜底找表：tableView 选择器 → KVC「table」→ 从 self.view 递归找 UITableView。
+- (UITableView *)pipFindTableIn:(UIView *)root {
+    if (root == nil) return nil;
+    if ([root isKindOfClass:[UITableView class]]) return (UITableView *)root;
+    for (UIView *v in root.subviews) {
+        UITableView *t = [self pipFindTableIn:v];
+        if (t != nil) return t;
+    }
+    return nil;
+}
+
+- (UITableView *)pipFindTableView {
+    @try {
+        UITableView *tv = [self tableView];
+        if (tv != nil) return tv;
+    } @catch (NSException *e) { /* 继续兜底 */ }
+    @try {
+        id t = [self valueForKey:@"table"];
+        if ([t isKindOfClass:[UITableView class]]) return (UITableView *)t;
+    } @catch (NSException *e) { /* 继续兜底 */ }
+    return [self pipFindTableIn:self.view];
+}
+
 - (void)pipBindSliders {
-    UITableView *tv = nil;
-    @try { tv = [self tableView]; } @catch (NSException *e) { tv = nil; }
-    if (tv == nil) { pipPrefsLog(@"bind: tableView 为 nil"); return; }
+    UITableView *tv = [self pipFindTableView];
+    if (tv == nil) {
+        pipPrefsLog(@"bind: 找不到 UITableView（self.view=%@）", NSStringFromClass(self.view.class));
+        return;
+    }
 
     NSMutableArray *cells = [NSMutableArray array];
     [self pipCollectCells:tv into:cells];
@@ -151,6 +178,17 @@ static void pipPrefsLogImpl(NSString *line) {
                     key, (double)sl.minimumValue, (double)sl.maximumValue, (double)sl.value);
     }
     pipPrefsLog(@"bind: 扫描到 cell=%d，本轮新绑定=%d", (int)cells.count, bound);
+
+    // cell 可能在绑定之后才真正创建（reload/滚动）⇒ 延迟重试几次，避免漏绑
+    if (bound == 0) {
+        __weak PiPBarSettingsController *weakSelf = self;
+        for (int i = 1; i <= 3; i++) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * i * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                [weakSelf pipBindSliders];
+            });
+        }
+    }
 }
 
 // 数值显示：直接改【滑块所在 cell 自己的】标题文字 —— 与滑块同一行、跟手即时
@@ -206,6 +244,11 @@ static void pipPrefsLogImpl(NSString *line) {
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     [self pipBindSliders];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    [self pipBindSliders];   // 布局完成后 cell 才齐全（已绑过的滑块靠关联对象自动跳过）
 }
 
 @end
