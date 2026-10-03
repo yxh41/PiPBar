@@ -45,6 +45,7 @@ static CGFloat gFrameW = 8.0;     // 顶/左右边框宽（用户反馈 12 太�
 static CGFloat gBarH = 40.0;      // 底部控制条高
 static BOOL gExtendHit = YES;        // 扩展命中区：让壳外/底部黑边也能接收触摸（按钮放黑边的前提）
 static BOOL gShowBarProgress = YES;  // 显示底部可拖动进度条
+static BOOL gFreePending = NO;       // FreeMove 偏好暂存（gFreeMove 声明在后面）
 
 // roothide per-app 容器隔离：Settings 里 CFPreferences 写的域，SpringBoard 读不到
 // （MapAdKiller/Oback 双双踩实）。范式同款：全局 plist 文件直读，两个进程命中同一物理文件。
@@ -64,7 +65,8 @@ static void pipReadPrefs(void) {
     if ((v = pipPref(@"DebugLog")) != nil) gDebugLog = [v boolValue];
     if ((v = pipPref(@"ExtendHit")) != nil) gExtendHit = [v boolValue];
     if ((v = pipPref(@"ShowProgress")) != nil) gShowBarProgress = [v boolValue];
-    if ((v = pipPref(@"FreeMove")) != nil) gFreeMove = [v boolValue];
+    // gFreeMove 声明在后面（与 FreePIP 手势实现放在一起），故在 pipApplyFrameState 前补读
+    if ((v = pipPref(@"FreeMove")) != nil) gFreePending = [v boolValue];
     if ((v = pipPref(@"FrameWidth")) != nil) {
         CGFloat f = [v floatValue];
         if (f >= 2.0 && f <= 30.0) gFrameW = f;
@@ -305,6 +307,15 @@ static BOOL gFreeMove = NO;          // NO=系统吸附（默认） YES=自由�
 static UIPanGestureRecognizer *gFreePan = nil;
 static UIPinchGestureRecognizer *gFreePinch = nil;
 static UILongPressGestureRecognizer *gFreeLongPress = nil;
+
+// 消费暂存的 FreeMove 偏好（必须在 gFreeMove 声明之后调用）
+static void pipApplyFreeMovePref(void) {
+    if (gFreeMove == gFreePending) return;
+    gFreeMove = gFreePending;
+    if (gFreePan != nil) gFreePan.enabled = gFreeMove;
+    if (gFreePinch != nil) gFreePinch.enabled = gFreeMove;
+    PIPLog(@"free-move %@（来自设置）", gFreeMove ? @"开" : @"关");
+}
 
 @interface PIPFrameView : UIView
 @property (nonatomic, strong) CAShapeLayer *caseLayer;
@@ -968,6 +979,7 @@ static void pipApplyFrameState(void) {
 static void pipDarwinCallback(CFNotificationCenterRef center, void *observer,
                               CFStringRef name, const void *object, CFDictionaryRef userInfo) {
     pipReadPrefs();
+    pipApplyFreeMovePref();   // 「长按解除吸附」开关热生效
     pipApplyFrameState();
 }
 
@@ -1027,6 +1039,7 @@ static void pipInitPegasusOnce(void);
         [canvas bringSubviewToFront:frame];
         gInstalledFrame = frame;
         pipEnsureSyncLink();   // v0.7：无卡顿心跳，保证 host 解析就绪后外框持续重画
+        pipApplyFreeMovePref();   // v0.16：应用「长按解除吸附」初始偏好
 
         // v0.11：命中区扩展 —— 壳画在窗口外（底部黑边）也能收触摸，按钮才敢放黑边。
         // 捕获 UIView 的原始 pointInside 作为兜底原实现，再分别 swizzle 画布与 PiP 窗口。
