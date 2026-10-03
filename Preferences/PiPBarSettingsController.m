@@ -178,7 +178,7 @@ static void pipPrefsLogImpl(NSString *line) {
 
         // 进页面先把当前值写进标题 + 建好右侧说明小字
         [self pipUpdateTitleForSlider:sl key:key value:sl.value];
-        [self pipLayoutValueLabel:[self pipEnsureValueLabelForCell:cell] inCell:cell];
+        [self pipLayoutSliderRowInCell:cell];
         pipPrefsLog(@"bind: %@ 滑块已挂 target（min=%.0f max=%.0f value=%.0f）",
                     key, (double)sl.minimumValue, (double)sl.maximumValue, (double)sl.value);
     }
@@ -197,9 +197,8 @@ static void pipPrefsLogImpl(NSString *line) {
     pipPrefsLog(@"bind: 扫描到 cell=%d，本轮新绑定=%d", (int)cells.count, bound);
 }
 
-// 数值显示：直接改【滑块所在 cell 自己的】标题文字。
-// v0.18：按用户要求 —— 标题只留名称（不再拼「：N pt」），**当前值单独显示在最右侧**，
-// 这样文字绝不压到滑块上（此前标题过长 + 右上角说明小字双重遮挡滑块）。
+// 数值显示：v0.19 彻底避开滑条 —— 标题与数值都缩小，**一起放到滑条【上方】一行**，
+// 左标题右数值，滑条独占下方整行。此前把数值放右侧仍会与滑条右端重叠（真机反馈）。
 - (void)pipUpdateTitleForSlider:(UISlider *)sl key:(NSString *)key value:(CGFloat)f {
     NSString *base = [self pipBaseNameForKey:key];
     if (base == nil) return;
@@ -207,19 +206,19 @@ static void pipPrefsLogImpl(NSString *line) {
     NSString *txt = [NSString stringWithFormat:@"%@：%.0f pt", base, f];
 
     if (cell != nil) {
-        // 标题只留名称，绝不与滑块重叠
-        if (![cell.textLabel.text isEqualToString:base]) {
-            cell.textLabel.text = base;
+        // 标题缩小（14→12pt）并置于左上
+        UILabel *title = cell.textLabel;
+        if (title != nil) {
+            if (![title.text isEqualToString:base]) title.text = base;
+            title.font = [UIFont systemFontOfSize:12.0];
+            title.textColor = [UIColor secondaryLabelColor];
         }
-        // 当前值放在最右侧独立标签
+        // 当前值：滑条上方右对齐小字
         UILabel *val = [self pipEnsureValueLabelForCell:cell];
-        NSString *vt = [NSString stringWithFormat:@"%.0f pt", f];
-        if (![val.text isEqualToString:vt]) {
-            val.text = vt;
-        }
-        [self pipLayoutValueLabel:val inCell:cell];
+        NSString *vt = [NSString stringWithFormat:@"%.0f", f];
+        if (![val.text isEqualToString:vt]) val.text = vt;
+        [self pipLayoutSliderRowInCell:cell];
     }
-    // 同步 specifier 名字（重进页面时标题仍显示数值更友好）
     for (PSSpecifier *spec in _specifiers) {
         if ([[spec propertyForKey:@"key"] isEqualToString:key]) { spec.name = txt; break; }
     }
@@ -231,31 +230,46 @@ static void pipPrefsLogImpl(NSString *line) {
     return nil;
 }
 
-// 滑块最右侧的当前值标签（v0.18 取代 v0.17 的说明小字）
+// 滑条上方的当前值标签（12pt 半粗体，等宽数字）
 - (UILabel *)pipEnsureValueLabelForCell:(UITableViewCell *)cell {
     if (cell == nil) return nil;
     UILabel *val = objc_getAssociatedObject(cell, kPiPValueLabelKey);
     if (val == nil) {
         val = [[UILabel alloc] initWithFrame:CGRectZero];
-        val.font = [UIFont monospacedDigitSystemFontOfSize:14.0 weight:UIFontWeightSemibold];
+        val.font = [UIFont monospacedDigitSystemFontOfSize:12.0 weight:UIFontWeightSemibold];
         val.textColor = [UIColor labelColor];
         val.textAlignment = NSTextAlignmentRight;
-        val.userInteractionEnabled = NO;    // 不吃触摸，避免挡滑块
+        val.userInteractionEnabled = NO;    // 不吃触摸，绝不挡滑条
         [cell.contentView addSubview:val];
         objc_setAssociatedObject(cell, kPiPValueLabelKey, val, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     return val;
 }
 
-// 右对齐到 cell 右缘（留 12pt 边距），垂直居中
-- (void)pipLayoutValueLabel:(UILabel *)val inCell:(UITableViewCell *)cell {
-    if (val == nil || cell == nil) return;
-    [val sizeToFit];
+// v0.19 布局：标题与数值同处**顶部一行**（数值右对齐），滑条被压到**下方**独占整行。
+// PSSliderCell 默认把 label 和 slider 叠在同一行右侧，故这里手工摆位。
+- (void)pipLayoutSliderRowInCell:(UITableViewCell *)cell {
+    if (cell == nil) return;
+    UISlider *sl = [self pipFindSliderIn:cell];
+    if (sl == nil) return;
     CGFloat w = CGRectGetWidth(cell.contentView.bounds);
-    CGFloat h = CGRectGetHeight(val.bounds);
-    CGFloat vh = CGRectGetHeight(cell.contentView.bounds);
-    CGFloat tw = MAX(h, 44.0);
-    val.frame = CGRectMake(w - tw - 12.0, (vh - MAX(h, 16.0)) / 2.0, tw, MAX(h, 16.0));
+    if (w < 10.0) return;      // 布局未就绪，等下一次
+    CGFloat pad = 14.0;
+    CGFloat topH = 15.0;
+
+    // 标题：左上
+    cell.textLabel.frame = CGRectMake(pad, 2.0, w * 0.55, topH);
+    // 数值：右上（与标题同一行，绝不与滑条重叠）
+    UILabel *val = objc_getAssociatedObject(cell, kPiPValueLabelKey);
+    if (val != nil) {
+        [val sizeToFit];
+        CGFloat vw = MAX(CGRectGetWidth(val.bounds) + 4.0, 28.0);
+        val.frame = CGRectMake(w - vw - pad, 2.0, vw, topH);
+    }
+    // 滑条：下方独占整行
+    CGFloat sy = topH + 4.0;
+    CGFloat sh = CGRectGetHeight(sl.bounds) > 0 ? CGRectGetHeight(sl.bounds) : 30.0;
+    sl.frame = CGRectMake(pad, sy, w - pad * 2.0, sh);
 }
 
 - (void)pipSliderChanged:(UISlider *)sender {
@@ -307,8 +321,7 @@ static void pipPrefsLogImpl(NSString *line) {
         if (![self pipIsSliderKey:key]) continue;
         UITableViewCell *cell = nil;
         @try { cell = [self cellForSpecifier:spec]; } @catch (NSException *e) { cell = nil; }
-        UILabel *val = objc_getAssociatedObject(cell, kPiPValueLabelKey);
-        [self pipLayoutValueLabel:val inCell:cell];
+        [self pipLayoutSliderRowInCell:cell];
     }
 }
 

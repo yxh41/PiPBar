@@ -95,6 +95,8 @@
 			<string>com.yxh41.pipbar</string>
 			<key>key</key>
 			<string>FrameWidth</string>
+			<key>height</key>
+			<integer>62</integer>
 			<key>label</key>
 			<string>外框宽度</string>
 			<key>min</key>
@@ -117,6 +119,8 @@
 			<string>com.yxh41.pipbar</string>
 			<key>key</key>
 			<string>BarHeight</string>
+			<key>height</key>
+			<integer>62</integer>
 			<key>label</key>
 			<string>底部高度</string>
 			<key>min</key>

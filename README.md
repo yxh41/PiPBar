@@ -59,6 +59,7 @@
 - **长按解除吸附**（v0.16）：系统 PiP 用 NSLayoutConstraint 把窗口钉在屏幕边缘，
   长按画面可切换「自由摆放」，之后可任意拖动、双指缩放（0.5x~2.5x），再长按恢复吸附。
   机制参考 FreePIP（sohsatoh，GPL-3）——仅借鉴思路，代码独立实现。
+- **外框宽度可拉到 0**（v0.18）：0 = 不显示顶/左右边框，此时整圈壳不绘制（含内沿高光）。
 - **切歌的硬限制（实测）**：短视频类 App（如抖音）虽完整注册了 NowPlaying 信息，
   但**不实现 `MPRemoteCommandCenter` 的 nextTrack/previousTrack handler**，
   系统切歌命令送达后无人处理（实测连发十余次 title 恒定不变）——

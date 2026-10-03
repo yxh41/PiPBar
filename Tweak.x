@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.17"
+#define PIP_BUILD_TAG @"v0.18"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -69,7 +69,9 @@ static void pipReadPrefs(void) {
     if ((v = pipPref(@"FreeMove")) != nil) gFreePending = [v boolValue];
     if ((v = pipPref(@"FrameWidth")) != nil) {
         CGFloat f = [v floatValue];
-        if (f >= 2.0 && f <= 30.0) gFrameW = f;
+        // v0.18：下限由 2 放宽到 0（0 = 不显示顶/左右边框）。
+        // 此前硬编码 f >= 2.0 会把用户拉到 0 的值直接丢弃，导致「调 0 了仍有边框」。
+        if (f >= 0.0 && f <= 30.0) gFrameW = f;
     }
     if ((v = pipPref(@"BarHeight")) != nil) {
         CGFloat f = [v floatValue];
@@ -332,7 +334,7 @@ static void pipApplyFreeMovePref(void) {
     PIPLog(@"free-move %@（来自设置）", gFreeMove ? @"开" : @"关");
 }
 
-@interface PIPFrameView : UIView
+@interface PIPFrameView : UIView <UIGestureRecognizerDelegate>
 @property (nonatomic, strong) CAShapeLayer *caseLayer;
 @property (nonatomic, strong) CAShapeLayer *edgeLayer;
 @property (nonatomic, strong) CAShapeLayer *barLayer;
@@ -494,6 +496,11 @@ static void pipSwizzlePointInsideOn(Class cls) {
                                                                 action:@selector(pipSeekGesture:)];
         self.seekTap = [[UITapGestureRecognizer alloc] initWithTarget:self
                                                                 action:@selector(pipSeekGesture:)];
+        // v0.18：进度条手势优先级高于自由拖动 —— 自由态下整块视频都命中本壳，
+        // 两个 pan 会互相抢（用户反馈「解除吸附后进度条就拖不动」）。
+        // delegate 放行 seekPan、拦下 gFreePan，即可两者共存。
+        self.seekPan.delegate = self;
+        self.seekTap.delegate = self;
         [self addGestureRecognizer:self.seekPan];
         [self addGestureRecognizer:self.seekTap];
 
@@ -548,6 +555,22 @@ static void pipSwizzlePointInsideOn(Class cls) {
         && !CGRectEqualToRect(self.frame, sup.bounds)) {
         self.frame = sup.bounds;   // 触发下一轮 layoutSubviews，届时已相等，不会死循环
     }
+}
+
+#pragma mark - v0.18 手势仲裁（进度条优先于自由拖动）
+
+// 进度条手势放行；自由拖动/缩放一律拦下 —— 由 pipSeekGesture 里的热区判定
+// 决定到底谁来处理这次触摸，两者不再互相抢。
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gr {
+    if (gr == self.seekPan || gr == self.seekTap) return YES;
+    if (gr == gFreePan || gr == gFreePinch) return NO;
+    if (gr == gFreeLongPress) return YES;
+    return YES;
+}
+
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gr
+shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    return YES;
 }
 
 #pragma mark - v0.16 FreePIP 式长按解吸
@@ -673,6 +696,11 @@ static NSString *pipTimeText(double sec) {
     CGFloat w = CGRectGetWidth(self.trackRect);
     if (w < 1.0 || gMRDuration <= 0) return;
     CGPoint p = [gr locationInView:self];
+    // v0.18：自由态下整块视频都会命中本壳，拖动进度条会与「自由拖动」pan 抢手势。
+    // 判据：起点必须落在进度条热区内，否则不参与（让自由拖动正常生效）。
+    CGRect hot = CGRectInset(self.trackRect, 0, -14.0);
+    if (!CGRectContainsPoint(hot, p)) return;
+    self.seeking = NO;   // 交由后续状态分支处理（避免重复进入）
 
     if (gr.state == UIGestureRecognizerStateBegan) {
         self.seeking = YES;
@@ -745,9 +773,12 @@ static NSString *pipTimeText(double sec) {
     if (innerR < 2.0 || innerR > 40.0) innerR = 16.0;
     CGFloat outerR = innerR + sw;
 
-    self.caseLayer.hidden = !gShowFrame || gExpandedUI;
-    self.edgeLayer.hidden = !gShowFrame || gExpandedUI;
-    if (gShowFrame && !gExpandedUI && outer.size.width > 8.0 && outer.size.height > 8.0) {
+    // v0.18：sw==0（用户把「外框宽度」拉到 0 = 不显示边框）时彻底不画壳。
+    // 否则 even-odd 挖洞路径会退化 —— 外圈与内洞重合，边缘仍会留下一圈发丝描边。
+    BOOL wantCase = gShowFrame && !gExpandedUI && sw >= 0.5;
+    self.caseLayer.hidden = !wantCase;
+    self.edgeLayer.hidden = !wantCase;
+    if (wantCase && outer.size.width > 8.0 && outer.size.height > 8.0) {
         UIBezierPath *op = [UIBezierPath bezierPathWithRoundedRect:outer cornerRadius:outerR];
         UIBezierPath *ip = [UIBezierPath bezierPathWithRoundedRect:vr cornerRadius:innerR];
         [op appendPath:ip];   // even-odd：视频矩形挖空，画面原样透出
