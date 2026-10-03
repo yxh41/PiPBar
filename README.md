@@ -113,6 +113,17 @@
   ③ **上一曲/下一曲接通**：`frame.onTap` 的 tag1/tag3 发 `action=1 + double=∓10`
      （上一曲 −10s / 下一曲 +10s）到 `handleCommand:`，脚注同步标注快退快进语义。
   构建：roothide theos，`-Werror`，无废弃 UIKit API。
+- v0.8：修「外框彻底消失」（v0.7 真机日志实锤两个叠加根因）——
+  ① **心跳锁死错误宿主**：v0.7 心跳只在「当前 host 无尺寸」时重扫，但 fallback 容器
+     `PGHitTestExtendableView` 是**全屏**的、装壳第一帧就有尺寸 ⇒ 重扫永远停摆 ⇒
+     壳锁死在全屏容器上（日志：装壳后再无第二条 HOST 行）。修：重扫条件改为
+     「还没找到真视频宿主（`PGLayerHost*`）就继续找」，节流 12Hz + 静默扫描防刷屏，
+     找到/变化才打一行 `HOST tick re-pick`。
+  ② **放大档 PiP 被误判全屏**：旧「>60% 屏宽」阈值会把双击放大的 PiP（约 2/3~9/10 屏宽）
+     整壳隐藏。修：收紧为「宽、高同时 ≥95% 屏幕」才算全屏播放。
+  参考（机制层面，未复用 GPL 代码）：FreePIP（sohsatoh）证实 PiP 位置由 NSLayoutConstraint
+  钉住、其边框画在 PiP VC 自身 view 内沿所以无需同步；CaiWanFeng/PiP（App 级）证实
+  KVO view 尺寸可作为心跳的替代方案（备选）。
 
 ## 设置
 

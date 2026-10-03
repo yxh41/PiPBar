@@ -31,7 +31,7 @@
 #import <objc/message.h>
 #import <CoreFoundation/CoreFoundation.h>
 
-#define PIP_BUILD_TAG @"v0.7"
+#define PIP_BUILD_TAG @"v0.8"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -137,6 +137,18 @@ static PIPFrameView *gInstalledFrame = nil;   // 当前壳（reload 与 play/pau
 // 拖动时窗口移动、但画布局部几何不变 ⇒ 不重画 ⇒ 不卡；只有 resize/expand 才重画。
 static CADisplayLink *gSyncLink = nil;
 static CGRect gLastVR = (CGRect){{0,0},{0,0}};
+// 真「视频宿主」判定：类名含 PGLayerHost* 才是可见视频矩形本身。
+// ⚠️ v0.8 关键教训：fallback 容器 PGHitTestExtendableView 是【全屏】的，
+// 装完第一帧就有尺寸 —— 「有尺寸」≠「找对了」，绝不能以有尺寸为由停找真宿主。
+static BOOL pipHostIsReal(UIView *host) {
+    return host != nil && [NSStringFromClass(host.class)
+                          rangeOfString:@"PGLayerHost"].location != NSNotFound;
+}
+// tick 节流重扫期间静默 pipPickHostView 的逐条日志（否则 12Hz 刷屏）；
+// 真宿主找到/变化时由 tick 统一打一行。
+static BOOL gPickQuiet = NO;
+#define PIP_PICK_LOG(fmt, ...) do { if (!gPickQuiet) PIPLog(fmt, ##__VA_ARGS__); } while (0)
+static int gTickN = 0;   // 真宿主未找到时的重扫节流计数（每 5 帧 ≈ 12Hz）
 
 // 造型对齐参考图（安卓 PiP 同款）：黑色圆角「手机壳」**套在视频外面**——
 //   视频矩形不动，壳画在容器层、向外扩：顶/左右 = gFrameW，底部 = gBarH。
@@ -255,9 +267,10 @@ static UIImage *pipIcon(BOOL playing) {
     CGFloat sw = gFrameW, bh = gBarH;
     UIView *host = gVideoHost;
     UIView *sup = self.superview;
-    // v0.6：loadView 时几何还全是 0，host 会回退成全屏 content.view ——
-    // 每次布局重解析，直到解析到有尺寸的真正视频宿主（PGLayerHostView）
-    if (gContentVC != nil && (host == nil || CGRectGetWidth(host.bounds) < 1.0)) {
+    // v0.8：只要还不是真视频宿主（PGLayerHost*）就继续解析 ——
+    // v0.7 只在 host 无尺寸时重扫，而 fallback 全屏容器装完就有尺寸 ⇒ 重扫停摆 ⇒
+    // 壳锁死在全屏容器上（外框消失真凶）。这里保留逐条日志（layoutSubviews 非每帧路径）
+    if (gContentVC != nil && !pipHostIsReal(host)) {
         UIView *h = pipPickHostView(gContentVC);
         if (h != nil) { host = h; gVideoHost = h; }
     }
@@ -268,8 +281,10 @@ static UIImage *pipIcon(BOOL playing) {
     CGFloat vrW = CGRectGetWidth(vr), vrH = CGRectGetHeight(vr);
     if (vrW < 8.0 || vrH < 8.0) return;
 
-    // PiP 展开成大窗（>60% 屏宽）时不画壳也不放按钮 —— 按【视频】宽度判
-    gExpandedUI = vrW > [UIScreen mainScreen].bounds.size.width * 0.6;
+    // v0.8：全屏判定收紧 —— 旧「>60% 屏宽」会把放大档 PiP（约 2/3~9/10 屏宽，
+    // 用户截图实锤）误判成全屏而整壳隐藏。只有宽、高同时 ≈ 屏幕才算全屏播放。
+    CGSize scr = [UIScreen mainScreen].bounds.size;
+    gExpandedUI = vrW > scr.width * 0.95 && vrH > scr.height * 0.95;
     self.hidden = !gEnabled || (!gShowFrame && !gShowButtons) || gExpandedUI;
 
     CGRect outer = CGRectMake(CGRectGetMinX(vr) - sw, CGRectGetMinY(vr) - sw,
@@ -343,11 +358,23 @@ static UIImage *pipIcon(BOOL playing) {
     PIPFrameView *f = gInstalledFrame;
     if (f == nil) { gLastVR = (CGRect){{0,0},{0,0}}; return; }
     if (!gShowFrame && !gShowButtons) { gLastVR = (CGRect){{0,0},{0,0}}; return; }
-    // host 几何就绪前为 0 → 每帧重解析真正的视频宿主（PGLayerHostView）
+    // v0.8 关键修复：只要还不是真视频宿主（PGLayerHost*）就节流重扫。
+    // v0.7 只在 host 无尺寸时重扫 —— 但 fallback 全屏容器 PGHitTestExtendableView
+    // 装完第一帧就有尺寸 ⇒ 重扫停摆 ⇒ 壳锁死在全屏容器上 ⇒ gExpandedUI 误判 ⇒ 整壳隐藏
+    //（真机日志实锤：装壳后再无第二条 HOST 行）。静默扫描防刷屏，找到/变化才打一行。
     UIView *host = gVideoHost;
-    if (gContentVC != nil && (host == nil || CGRectGetWidth(host.bounds) < 1.0)) {
+    if (gContentVC != nil && !pipHostIsReal(host) && (gTickN++ % 5) == 0) {
+        gPickQuiet = YES;
         UIView *h = pipPickHostView(gContentVC);
-        if (h != nil) { host = h; gVideoHost = h; }
+        gPickQuiet = NO;
+        if (h != nil && h != host) {
+            gVideoHost = h;
+            host = h;
+            if (pipHostIsReal(h)) {
+                PIPLog(@"HOST tick re-pick -> %@ frame=%@",
+                       NSStringFromClass(h.class), NSStringFromCGRect(h.frame));
+            }
+        }
     }
     if (host == nil || host.window == nil) return;
     // 当前视频矩形（本画布坐标），与 layoutSubviews 算法完全一致
@@ -457,12 +484,12 @@ static UIView *pipPickHostView(UIViewController *content) {
     UIView *v = content.view;
     if (v == nil) return nil;
 
-    PIPLog(@"HOST contentVC=%@ view=%@ frame=%@",
+    PIP_PICK_LOG(@"HOST contentVC=%@ view=%@ frame=%@",
            NSStringFromClass(content.class), NSStringFromClass(v.class), NSStringFromCGRect(v.frame));
 
     UIView *strong = pipScanForVideoHost(v, YES);
     if (strong != nil) {
-        PIPLog(@"HOST <- scan(strong) %@ frame=%@", NSStringFromClass(strong.class),
+        PIP_PICK_LOG(@"HOST <- scan(strong) %@ frame=%@", NSStringFromClass(strong.class),
                NSStringFromCGRect(strong.frame));
         return strong;
     }
@@ -473,25 +500,25 @@ static UIView *pipPickHostView(UIViewController *content) {
             id cand = [content valueForKey:name];
             if ([cand isKindOfClass:[UIView class]]) {
                 UIView *cv = (UIView *)cand;
-                PIPLog(@"HOST candidate %@ -> %@ frame=%@",
+                PIP_PICK_LOG(@"HOST candidate %@ -> %@ frame=%@",
                        name, NSStringFromClass(cv.class), NSStringFromCGRect(cv.frame));
                 CGFloat cw = CGRectGetWidth(cv.bounds), rw = CGRectGetWidth(v.bounds);
                 // 只接受「明显比容器小」的：跟容器一样宽的说明不是被裁的视频层
                 if (cw > 1.0 && (rw <= 0.0 || cw < rw - 1.0)) return cv;
             }
         } @catch (NSException *e) {
-            PIPLog(@"HOST candidate %@ 不可用: %@", name, e.name);
+            PIP_PICK_LOG(@"HOST candidate %@ 不可用: %@", name, e.name);
         }
     }
 
     UIView *weak = pipScanForVideoHost(v, NO);
     if (weak != nil) {
-        PIPLog(@"HOST <- scan(weak) %@ frame=%@", NSStringFromClass(weak.class),
+        PIP_PICK_LOG(@"HOST <- scan(weak) %@ frame=%@", NSStringFromClass(weak.class),
                NSStringFromCGRect(weak.frame));
         return weak;
     }
 
-    PIPLog(@"HOST fallback -> contentViewController.view（若仍伸出去，请回传 HIER 日志）");
+    PIP_PICK_LOG(@"HOST fallback -> contentViewController.view（若仍伸出去，请回传 HIER 日志）");
     return v;
 }
 
