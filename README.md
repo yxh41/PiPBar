@@ -27,9 +27,9 @@
    | 启用 | 开 | 关掉后完全不注入，等于没装 |
    | 显示外框 | 开 | 圆角「手机壳」：顶/左右同宽 |
    | 显示控制按钮 | 开 | 底部三颗：上一曲 / 播放暂停 / 下一曲 |
-   | 外框宽度 | 12 | 4–24 pt |
+   | 外框宽度 | 8 | 4–24 pt（v0.5 由 12 改 8：顶/左右更细） |
    | 底部高度 | 40 | 28–80 pt，比左右宽的那条 |
-   | 文件日志 | 关 | 打开后写 `/var/mobile/Library/Logs/PiPBar.log` |
+   | 文件日志 | 开 | 装完 respring 即有 `/var/mobile/Library/Logs/PiPBar.log` |
    | 调试日志 | 关 | 额外打 `HIER` 视图层级树（排查画错位时用） |
 
    改任意一项**不用 respring**，走 Darwin 通知即时热生效。
@@ -40,8 +40,8 @@
 
 ## 日志怎么看
 
-- **文件**（推荐）：设置里开「文件日志」→ 触发一次 PiP →
-  用 Filza 打开 `/var/mobile/Library/Logs/PiPBar.log`（看不到文件 = 开关没开或还没触发过 PiP）。
+- **文件**（推荐）：「文件日志」默认开，触发一次 PiP 后即有 →
+  用 Filza 打开 `/var/mobile/Library/Logs/PiPBar.log`（看不到文件 = 还没触发过 PiP，或 tweak 没加载）。
 - **syslog / Console**：过滤关键字 `[PiPBar`。
 - 关键行含义：
   - `HOST <- scan(strong)` → 已找到真正的视频宿主层（最理想）
@@ -53,9 +53,11 @@
 
 ## 已知限制
 
-- 播放/暂停已可用；**上一曲 / 下一曲待 v0.3**，需要真机 `CMD playbackAction=N` 日志
-  确定 Pegasus 的 action 枚举值后接通（目前点这两颗只打日志）。
+- 播放/暂停已可用；**上一曲 / 下一曲待 v0.6**，需要真机 `CMD playbackAction=N` 日志
+  确定 Pegasus 的 action 枚举值后接通（目前点这两颗只打日志，并 dump `PGCMD` 方法表辅助）。
 - 只支持系统原生 PiP，App 内自建的假画中画不在射程内。
+- roothide 下设置面板走「编译型 PreferenceLoader bundle + 全局 plist 直写桥」
+  （绕过 per-app NSUserDefaults 容器隔离，SpringBoard 才能读到）。
 
 ## 版本
 
@@ -63,10 +65,19 @@
 - v0.2：设置面板（plist-only bundle）+ 文件日志 + 挂载层三级择优 + layoutSubviews 自愈 +
   hitTest 覆写 + Pegasus 钩子拆独立 %group
   （遗留：面板在 roothide 下不显示、按钮 0×0 不可见、直角边条不好看）
-- v0.3：设置面板改自包含 plist（PreferenceLoader/Preferences/，零 bundle 依赖，roothide 可见）+
-  外框改 CAShapeLayer even-odd 圆角壳（圆角跟随宿主）+ 按钮显式 frame 56x44 实修 +
-  按钮直挂 self（底部条不再吞触摸）
-- v0.4（计划）：接通上一曲/下一曲（等真机 CMD 嗅探日志拿 playbackAction 码）
+- v0.3：设置面板改自包含入口 plist（PreferenceLoader/Preferences/，零 bundle 依赖）+
+  外框改 CAShapeLayer even-odd 圆角壳 + 按钮显式 frame + 直挂 self
+  （真机仍反馈：设置不可见、外框造型差、按钮看不到）
+- v0.4（build 4223ab6）：放弃自包含 plist，整套照搬 MapAdKiller 的**编译型** PreferenceLoader bundle
+  （PiPBarPrefs.bundle + 全局 plist 直写桥，绕过 roothide 容器隔离）→ **设置终于可见**；
+  外框从视频层搬到容器层（要外框不是内框）+ 15pt 图标随播放状态切换 + 按钮 44x32 精致化
+- v0.5（build d1dd87b）：修四个真机问题 ——
+  ① 遮罩：shadowPath 只用外圈路径（带洞路径当 shadowPath 会把投影投进视频区，画面像蒙黑遮罩）；
+  ② 三按钮无反应：底条在 PiP 窗口外触摸不派发 → 按钮搬独立悬浮 UIWindow（windowLevel+1）+ CADisplayLink
+     每帧同步位置，三颗全部可点；③ 日志文件：FileLog 默认开，装完 respring 即出 PiPBar.log；
+  ④ 外框太粗：FrameWidth 默认 12→8；另加 PiP 展开 >60% 屏宽自动收起壳。
+  CI 编译修复：`CGRectZero` 非编译期常量 → `(CGRect){{0,0},{0,0}}`；`PIPFrameView` 文件级静态指针
+  加 `@class` 前置声明（C 前两段均 -Werror 失败）。
 
 ## 设置
 
