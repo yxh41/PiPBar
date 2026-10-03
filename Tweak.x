@@ -31,7 +31,7 @@
 #import <objc/message.h>
 #import <CoreFoundation/CoreFoundation.h>
 
-#define PIP_BUILD_TAG @"v0.8"
+#define PIP_BUILD_TAG @"v0.9"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -214,9 +214,12 @@ static UIImage *pipIcon(BOOL playing) {
         self.barLayer.masksToBounds = NO;
         [self.layer addSublayer:self.barLayer];
         // 三颗按钮：壳的子视图（壳实测渲染位置正确；按钮在窗口边界内 ⇒ 必然可点）
-        [self pipAddButtonWithTag:1 icon:@"backward.end.fill" fallback:@"◀◀"];
+        // v0.9：图标改 skip 语义 —— Pegasus 的 30 个命令工厂里只有 skipByInterval/
+        // skipToLive/skipPreroll，**没有 track/next/previous**（系统 AVKit PiP 同样
+        // 只有快退/快进/播放暂停），故左右键是 ±10s 快退快进，不是切歌。
+        [self pipAddButtonWithTag:1 icon:@"gobackward.10" fallback:@"◀◀"];
         [self pipAddButtonWithTag:2 icon:nil fallback:@"▶"];   // play/pause 图标 layoutSubviews 里按状态设
-        [self pipAddButtonWithTag:3 icon:@"forward.end.fill" fallback:@"▶▶"];
+        [self pipAddButtonWithTag:3 icon:@"goforward.10" fallback:@"▶▶"];
         [self setNeedsLayout];
     }
     return self;
@@ -309,32 +312,45 @@ static UIImage *pipIcon(BOOL playing) {
         self.edgeLayer.path = nil;
     }
 
-    // —— 按钮条：叠在视频底部【内侧】（窗口边界内 = 触摸可达）——
+    // —— 按钮条：骑跨视频下沿（v0.9）——
+    // ⚠️ iOS 硬约束：PiP 窗口边界 == 视频矩形（日志实测 PGHitTestExtendableView 与
+    // PGLayerHostView 同为 170x302.33），窗口外坐标不进入 hitTest —— 这正是 v0.5
+    // 「按钮点不到」被推翻重做的根因。故按钮本体必须留在窗口内；折中做法是
+    // **胶囊条视觉上向下溢出、骑在外框底部黑边上**，按钮中心仍压在视频下沿以内。
     BOOL showBar = gShowButtons && !gExpandedUI;
-    CGFloat barH = 36.0, inset = 6.0;
-    CGRect barRect = CGRectZero;
+    CGFloat barH = 34.0, inset = 8.0;
+    CGRect barRect = CGRectZero;      // 胶囊视觉矩形（可溢出到黑边）
+    CGRect btnRow = CGRectZero;      // 按钮排布矩形（严格在窗口内）
     self.barLayer.hidden = !showBar;
     if (showBar) {
-        barRect = CGRectMake(CGRectGetMinX(vr) + inset, CGRectGetMaxY(vr) - barH - inset,
-                             vrW - inset * 2.0, barH);
+        // 视觉胶囊：上沿在视频底部往上 barH，下沿向下溢出 overflow（压进黑色底边）
+        CGFloat overflow = MIN(bh * 0.55, 22.0);
+        barRect = CGRectMake(CGRectGetMinX(vr) + inset,
+                             CGRectGetMaxY(vr) - barH,
+                             vrW - inset * 2.0, barH + overflow);
         self.barLayer.path =
             [UIBezierPath bezierPathWithRoundedRect:barRect
                                        cornerRadius:barH / 2.0].CGPath;
+        // 按钮行：整体上移 overflow 的一半，保证三颗都落在视频矩形内（可点）
+        btnRow = CGRectMake(CGRectGetMinX(barRect),
+                            CGRectGetMinY(barRect) + overflow * 0.5,
+                            CGRectGetWidth(barRect), barH);
     } else {
         self.barLayer.path = nil;
     }
 
     CGFloat xs[3] = {0.22, 0.50, 0.78};
-    CGFloat btnW = 44.0, btnH = 30.0;
-    CGFloat by = CGRectGetMinY(barRect) + (barH - btnH) / 2.0;
+    CGFloat btnW = 44.0, btnH = 28.0;
+    CGFloat by = CGRectGetMinY(btnRow) + (CGRectGetHeight(btnRow) - btnH) / 2.0;
     NSUInteger i = 0;
     for (UIView *v in self.subviews) {
         if (![v isKindOfClass:[UIButton class]]) continue;
-        CGFloat cx = CGRectGetMinX(barRect) + CGRectGetWidth(barRect) * xs[i];
+        CGFloat cx = CGRectGetMinX(btnRow) + CGRectGetWidth(btnRow) * xs[i];
         v.frame = CGRectMake(cx - btnW / 2.0, by, btnW, btnH);   // 必须 frame，不是 center（v0.2 踩坑）
         v.hidden = !showBar;
         if (v.tag == 2) [(UIButton *)v setImage:pipIcon(gPlaying) forState:UIControlStateNormal];
         i++;
+        if (i >= 3) break;
     }
 }
 
@@ -622,7 +638,7 @@ static void pipInitPegasusOnce(void);
                         (id (*)(id, SEL, long long, double))objc_msgSend;
                     id cmd = build(cmdCls, mk, 1LL, off);
                     [(PGPictureInPictureViewController *)c handleCommand:cmd];
-                    PIPLog(@"seek -> action=1 offset=%.0f", off);
+                    PIPLog(@"skip -> action=1 offset=%.0f（快退/快进，非切歌：Pegasus 无 track 命令）", off);
                 } else {
                     PIPLog(@"PGCommand/commandForPlaybackAction:associatedDoubleValue: 不可用");
                 }

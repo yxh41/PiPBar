@@ -124,6 +124,22 @@
   参考（机制层面，未复用 GPL 代码）：FreePIP（sohsatoh）证实 PiP 位置由 NSLayoutConstraint
   钉住、其边框画在 PiP VC 自身 view 内沿所以无需同步；CaiWanFeng/PiP（App 级）证实
   KVO view 尺寸可作为心跳的替代方案（备选）。
+- v0.9：v0.8 真机确认**外框已重现并正确贴合视频**（日志 `HOST <- scan(strong) PGLayerHostView
+  frame={{0,0},{170,302.33}}`），本轮修三个体验问题——
+  ① **按钮压到外框上**：胶囊条改为**骑跨视频下沿**（视觉向下溢出、压进底部黑边），
+     按钮本体仍留在窗口内。原因：PiP 窗口边界 == 视频矩形（日志实测容器与视频层同为
+     170×302.33），窗口外坐标不进入 hitTest——这正是 v0.5「按钮点不到」的根因，
+     所以只能视觉骑跨、不能真放窗外。
+  ② **左右键语义纠正**：用户日志里 30 个 `PGCMD-META` 工厂方法就是 Pegasus 的全部命令，
+     只有 `skipByInterval`/`skipToLive`/`skipPreroll`，**没有 track/next/previous**；
+     系统 AVKit PiP 本身 likewise 只有快退/快进/播放暂停。故图标由 `backward.end.fill`/
+     `forward.end.fill`（切歌语义）改为 `gobackward.10`/`goforward.10`（±10s 快退快进），
+     脚注与日志文案同步说明——**画中画无法切歌，这是系统能力上限**。
+  ③ **滑块数值刷不出来**：根因是 roothide 下 `PSSliderCell` 拖动时未必回调
+     `setPreferenceValue:`。改为 `viewWillAppear`/`viewDidAppear` 时递归找出 cell 内的
+     `UISlider`，用关联对象标记幂等挂 `UIControlEventValueChanged` target，拖动即刷新；
+     数值 cell 双保险刷新（直接改可见 cell 的 label + 更新 spec.name 并 reloadSpecifier）；
+     拖动期全局 plist 每帧写但 darwin 通知节流 120ms，避免通知风暴。
 
 ## 设置
 

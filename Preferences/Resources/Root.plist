@@ -58,7 +58,7 @@
 			<key>default</key>
 			<true/>
 			<key>footnote</key>
-			<string>底部三颗：上一曲（−10s 快退）/ 播放暂停 / 下一曲（+10s 快进）。画中画无曲目概念，左右键做快退/快进。</string>
+			<string>底部三颗：快退 10 秒 / 播放暂停 / 快进 10 秒。注意：系统画中画（AVKit + Pegasus）只提供快退快进与播放暂停，没有「上一个/下一个视频」的切歌命令，故左右键是 ±10s 而非切歌。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
