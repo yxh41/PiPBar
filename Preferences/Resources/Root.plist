@@ -90,21 +90,19 @@
 		</dict>
 		<dict>
 			<key>cell</key>
-			<string>PSSliderCell</string>
+			<string>PiPSliderCell</string>
 			<key>defaults</key>
 			<string>com.yxh41.pipbar</string>
 			<key>key</key>
 			<string>FrameWidth</string>
 			<key>label</key>
 			<string>外框宽度</string>
+			<key>height</key>
+			<real>80</real>
 			<key>min</key>
 			<real>0</real>
 			<key>max</key>
 			<real>24</real>
-			<key>minValueText</key>
-			<string>0</string>
-			<key>maxValueText</key>
-			<string>24</string>
 			<key>default</key>
 			<real>8</real>
 			<key>footnote</key>
@@ -112,21 +110,19 @@
 		</dict>
 		<dict>
 			<key>cell</key>
-			<string>PSSliderCell</string>
+			<string>PiPSliderCell</string>
 			<key>defaults</key>
 			<string>com.yxh41.pipbar</string>
 			<key>key</key>
 			<string>BarHeight</string>
 			<key>label</key>
 			<string>底部高度</string>
+			<key>height</key>
+			<real>80</real>
 			<key>min</key>
 			<real>28</real>
 			<key>max</key>
 			<real>80</real>
-			<key>minValueText</key>
-			<string>28</string>
-			<key>maxValueText</key>
-			<string>80</string>
 			<key>default</key>
 			<real>40</real>
 			<key>footnote</key>
