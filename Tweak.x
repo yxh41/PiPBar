@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.37c"
+#define PIP_BUILD_TAG @"v0.37d"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -258,6 +258,7 @@ static void pipAdoptElapsed(double mrEla, double dur, double rate, double tNow) 
 }
 static BOOL gSeekBusy = NO;          // 拖动/seek 进行中：暂停外推，别跟用户抢进度
 static BOOL gEpisodeFired = NO;      // v0.36：本次竖向滑动是否已触发切集（防手势内重复触发）
+static BOOL gEpisodeActive = NO;     // v0.37d：已判定为竖向切集手势 ⇒ 提前阻断系统 pan，避免窗口被带动
 static double gDragTargetSec = 0;    // 拖动中的目标秒数
 static double gSeekGraceUntil = 0;   // 松手宽限期（墙上时间）：期内 gSeekBusy 保持，心跳不覆盖进度
 static double gSeekTargetSec = 0;    // 松手时 seek 的目标秒数（供宽限期后校验 App 是否真的跳过去）
@@ -492,6 +493,7 @@ static BOOL pipSystemPanHitHotZone(UIPanGestureRecognizer *sender) {
 static BOOL pipShouldBlockSystemPan(UIPanGestureRecognizer *sender) {
     if (gSeekBusy) return YES;   // 正在拖进度条 ⇒ 绝不能让系统拖窗口
     if (gFreeMove) return YES;   // 自由态由我们自己的 pan 负责
+    if (gEpisodeActive) return YES;  // v0.37d：已判为竖向切集手势，别再让窗口跟着跑
     if (pipSystemPanHitHotZone(sender)) return YES;  // v0.29：快照态进度条热区也吞系统 pan
     return NO;
 }
@@ -1549,8 +1551,10 @@ static void pipFireEpisode(NSInteger dir) {
     // App 未实现播放列表时返回 NO，静默无效（无副作用）。B站锁屏「下一集」即走此通道。
     int cmd = (dir > 0) ? 4 : 5;
     BOOL ok = gMRSendCommand(cmd, nil);
-    PIPLog(@"episode skip %s → MRMediaRemoteSendCommand(%d) ok=%d",
-           dir > 0 ? "next" : "prev", cmd, ok);
+    // list=gMRHasPlaylist：App 是否上报音轨数>1（有播放列表）。list=0 ⇒ App 侧不支持切集，
+    // 命令虽派发成功(ok=1)也多半无反应 —— 据此一眼区分「我们没触发」还是「App 不认」。
+    PIPLog(@"episode skip %s → MRMediaRemoteSendCommand(%d) ok=%d list=%d",
+           dir > 0 ? "next" : "prev", cmd, ok, gMRHasPlaylist);
 }
 
 // v0.37c 修复：对该系统 pan 手势，**给 locationInView:/translationInView: 传 nil 恒返 {0,0}**
@@ -1562,11 +1566,12 @@ static CGPoint gEpisodeStart = {0, 0};
 static BOOL    gEpisodeStartSet = NO;
 static NSTimeInterval gEpisodeProbeT = 0;
 static BOOL pipHandleEpisodePan(UIPanGestureRecognizer *sender) {
-    if (!gEpisodeSwipe) return NO;   // 设置关了
-    if (gFreeMove)    return NO;     // 自由态：竖向滑留给自由拖动窗口
-    if (gSeekBusy)    return NO;     // 进度条拖动中
+    // 任何短路分支都要清掉 gEpisodeActive，避免它卡住导致系统 pan（移窗）被永久阻断
+    if (!gEpisodeSwipe) { gEpisodeActive = NO; return NO; }   // 设置关了
+    if (gFreeMove)      { gEpisodeActive = NO; return NO; }   // 自由态：竖向滑留给自由拖动窗口
+    if (gSeekBusy)      { gEpisodeActive = NO; return NO; }   // 进度条拖动中
     PIPFrameView *cv = gInstalledFrame;
-    if (cv == nil) return NO;        // 没壳就无从换算，放行系统逻辑
+    if (cv == nil) { gEpisodeActive = NO; return NO; }        // 没壳就无从换算，放行系统逻辑
     if (sender.state == UIGestureRecognizerStateChanged) {
         CGPoint cur = [sender locationInView:cv];
         if (!gEpisodeStartSet) {     // 没收到 Began 也能建立基线（兜底）
@@ -1583,6 +1588,9 @@ static BOOL pipHandleEpisodePan(UIPanGestureRecognizer *sender) {
                    dy, dx, gEpisodeStartSet, cur.x, cur.y, gEpisodeStart.x, gEpisodeStart.y,
                    gEpisodeFired, gEpisodeSwipe, gFreeMove, gSeekBusy);
         }
+        // v0.37d：方向一确定（≥10pt 且以竖向为主）就置位，让 pipShouldBlockSystemPan 提前
+        // 阻断系统 pan —— 把窗口被带动的行程压到 <10pt（原来要等 24pt 才拦，窗口跑得更多）。
+        if (fabs(dy) >= 10.0 && fabs(dy) > dx) gEpisodeActive = YES;
         if (fabs(dy) >= 24.0 && fabs(dy) > dx) {   // 阈值 24pt 且 predominantly 垂直
             NSInteger dir = (dy < 0) ? 1 : -1;     // 上滑(dy<0)=下一集(+1)  下滑(dy>0)=上一集(-1)
             if (!gEpisodeFired) { gEpisodeFired = YES; pipFireEpisode(dir); }
@@ -1593,6 +1601,7 @@ static BOOL pipHandleEpisodePan(UIPanGestureRecognizer *sender) {
         || sender.state == UIGestureRecognizerStateCancelled) {
         gEpisodeFired = NO;
         gEpisodeStartSet = NO;
+        gEpisodeActive = NO;
     }
     return NO;
 }
