@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.32"
+#define PIP_BUILD_TAG @"v0.33"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -1152,16 +1152,17 @@ static NSString *pipTimeText(double sec) {
     if (target > gMRDuration) target = gMRDuration;
     if (sec < 0) {
         [self pipSeekBackByInterval:sec];   // 后退：Pegasus skipByInterval（已验证）
+    } else if (gMRSetElapsedTime != NULL) {
+        gMRSetElapsedTime(target);
+        PIPLog(@"skip +%.1fs → SetElapsedTime %.1f", sec, target);
     } else {
-        if (gMRSetElapsedTime != NULL) {
-            gMRSetElapsedTime(target);
-            gMRElapsed = target;
-            gMRUpdatedAt = [[NSDate date] timeIntervalSinceReferenceDate];
-            PIPLog(@"skip +%.1fs → SetElapsedTime %.1f", sec, target);
-        } else {
-            [self pipSeekBackByInterval:sec];
-        }
+        [self pipSeekBackByInterval:sec];
     }
+    // v0.33：前后向 seek 都立即本地校准播放时钟，进度条即时跟随。
+    // 后退依赖 App 经 MR 回报真实位置，先本地占位，下一轮 MR 回调再校正（pull-down/catch-up），
+    // 避免「点后退进度条不动、只有 App 跳」的脱节（解除吸附态下尤其明显）。
+    gMRElapsed = target;
+    gMRUpdatedAt = [[NSDate date] timeIntervalSinceReferenceDate];
 }
 
 // v0.30：点按画中画左半区快退、右半区快进
