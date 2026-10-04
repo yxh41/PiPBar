@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.28"
+#define PIP_BUILD_TAG @"v0.29"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -168,6 +168,29 @@ static double gMRDuration = 0;       // 总时长（秒）；0 = 未知/直播�
 static double gMRElapsed = 0;        // 当前进度（秒）
 static double gMRUpdatedAt = 0;      // 上次更新的墙上时间（用于线性外推，避免每秒跳一下）
 static double gMRRate = 0;           // playbackRate（1=播放中 0=暂停）
+
+// v0.29：进度条统一时间源 —— 以「播放时钟」（wall-clock × rate 累加）为准，
+// MediaRemote/Pegasus 的 elapsed 只用于：① 首次锚定 ② 真循环（接近片尾且回到片头）
+// ③ 播放时钟明显落后时追平。绝不直接覆盖，否则短视频 App 的陈旧 MR elapsed
+// 会让进度条越跑越领先/落后真实画面（用户报「进度条自己走时跟视频走着不一致」）。
+static void pipAdoptElapsed(double mrEla, double dur, double rate, double tNow) {
+    if (dur > 1.0) gMRDuration = dur;
+    if (rate >= 0.0) gMRRate = rate;
+    if (gMRUpdatedAt <= 0) {            // 首次锚定（含刚进入画中画）
+        gMRElapsed = mrEla > 0 ? mrEla : 0;
+        gMRUpdatedAt = tNow;
+        return;
+    }
+    double selfEla = gMRElapsed + (gMRRate > 0.05 ? (tNow - gMRUpdatedAt) * gMRRate : 0);
+    BOOL nearEnd = (selfEla > gMRDuration - 2.0);
+    BOOL mrStart = (mrEla < 2.0);
+    if (nearEnd && mrStart) {                 // 真循环：片尾 → 片头
+        gMRElapsed = mrEla; gMRUpdatedAt = tNow;
+    } else if (mrEla > selfEla + 1.5) {       // 播放时钟落后（曾被错误暂停等）⇒ 追平
+        gMRElapsed = mrEla; gMRUpdatedAt = tNow;
+    }
+    // 其余：保留播放时钟，不覆盖（进度条贴合真实画面）
+}
 static BOOL gSeekBusy = NO;          // 拖动/seek 进行中：暂停外推，别跟用户抢进度
 static double gDragTargetSec = 0;    // 拖动中的目标秒数
 static double gSeekGraceUntil = 0;   // 松手宽限期（墙上时间）：期内 gSeekBusy 保持，心跳不覆盖进度
@@ -254,8 +277,9 @@ static void pipMRRefresh(void) {
             gMRIsMusicApp = music; gMRHasPlaylist = hasList;
             gMRProhibitsSkip = prohibit; gMRTitle = ti; gMRUniqueID = ui;
             if (!gSeekBusy) {           // 用户正在拖进度条 ⇒ 不覆盖，避免回跳
-                gMRDuration = dur; gMRElapsed = ela; gMRRate = rate;
-                gMRUpdatedAt = [[NSDate date] timeIntervalSinceReferenceDate];
+                double tNow = [[NSDate date] timeIntervalSinceReferenceDate];
+                // v0.29：进度统一走「播放时钟」，MR elapsed 只做锚定/循环/追平，不直接覆盖
+                pipAdoptElapsed(ela, dur, rate, tNow);
                 // v0.26：宽限期过后的第一次上报 = 校验 seek 是否真的生效（差值为 0 附近才算成功）
                 if (gSeekTargetSec > 0.0) {
                     PIPLog(@"seek 校验：目标 %.2fs，App 实报 %.2fs（差 %+.2fs）",
@@ -357,9 +381,21 @@ static UILongPressGestureRecognizer *gFreeLongPress = nil;
 // 黑边区域可命中，而**挂在窗口/交互控制器上的 pan 手势同样会收到投递到子视图的触摸**
 // ⇒ 我们在进度条上拖动时，系统仍在拖窗口。FreePIP 解决同一问题的办法就是 hook 掉
 // handlePanGesture:（仅在需要时放行 %orig）。
-static BOOL pipShouldBlockSystemPan(void) {
+// v0.17：系统 pan 手势是否要被我们吞掉。
+// v0.29：快照态（gFreeMove=NO）下，进度条热区内的拖动也要吞掉系统 pan ——
+// 否则第一帧系统 pan 先动窗、gSeekBusy 还没置位，窗口会跟着进度条跑（真机反馈）。
+static BOOL pipSystemPanHitHotZone(UIPanGestureRecognizer *sender) {
+    PIPFrameView *cv = gInstalledFrame;
+    if (cv == nil || CGRectGetWidth(cv.trackRect) <= 1.0) return NO;
+    CGPoint p = [sender locationInView:cv];
+    CGRect hot = CGRectInset(cv.trackRect, -8.0, -20.0);
+    return CGRectContainsPoint(hot, p);
+}
+
+static BOOL pipShouldBlockSystemPan(UIPanGestureRecognizer *sender) {
     if (gSeekBusy) return YES;   // 正在拖进度条 ⇒ 绝不能让系统拖窗口
     if (gFreeMove) return YES;   // 自由态由我们自己的 pan 负责
+    if (pipSystemPanHitHotZone(sender)) return YES;  // v0.29：快照态进度条热区也吞系统 pan
     return NO;
 }
 
@@ -1306,7 +1342,7 @@ static void pipInitPegasusOnce(void);
 %hook SBPIPInteractionController
 
 - (void)handlePanGesture:(UIPanGestureRecognizer *)sender {
-    if (pipShouldBlockSystemPan()) { PIPLog(@"system pan blocked (drag/seek)"); return; }
+    if (pipShouldBlockSystemPan(sender)) { PIPLog(@"system pan blocked (drag/seek)"); return; }
     %orig;
 }
 
@@ -1319,7 +1355,7 @@ static void pipInitPegasusOnce(void);
 // 手势会连同子视图（我们的壳）上的触摸一起收到 ⇒ 拖进度条时画中画跟着跑。
 // FreePIP（sohsatoh）解决同一问题的做法就是在这里 %orig 前加条件放行。
 - (void)_handlePanGesture:(UIPanGestureRecognizer *)sender {
-    if (pipShouldBlockSystemPan()) { PIPLog(@"system pan blocked (drag/seek)"); return; }
+    if (pipShouldBlockSystemPan(sender)) { PIPLog(@"system pan blocked (drag/seek)"); return; }
     %orig;
 }
 
@@ -1486,16 +1522,14 @@ static void pipInitPegasusOnce(void);
                 }
             }
             if (!gSeekBusy) {   // 用户在拖进度条时不覆盖，避免回跳
-                BOOL got = NO;
-                if (pDur > 0.5) { gMRDuration = pDur; got = YES; }
-                if (pEla >= 0.0) {
-                    // 短视频会循环，elapsed 允许回退 —— 直接采用，不再外推领先真实画面
-                    gMRElapsed = pEla;
-                    gMRUpdatedAt = [[NSDate date] timeIntervalSinceReferenceDate];
-                    got = YES;
-                }
+                if (pDur > 0.5) gMRDuration = pDur;
                 if (pRate >= 0.0) gMRRate = pRate;
-                if (got && !gPegasusLogged) {
+                if (pEla >= 0.0) {
+                    double tNow = [[NSDate date] timeIntervalSinceReferenceDate];
+                    // v0.29：Pegasus 的 elapsed 也走统一播放时钟逻辑（锚定/循环/追平，不直接覆盖）
+                    pipAdoptElapsed(pEla, gMRDuration, gMRRate, tNow);
+                }
+                if (!gPegasusLogged) {
                     gPegasusLogged = YES;
                     PIPLog(@"进度改用 Pegasus 播放状态（dur=%.2f ela=%.2f rate=%.2f）keys={%@}",
                            gMRDuration, gMRElapsed, gMRRate,
