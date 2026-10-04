@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.37"
+#define PIP_BUILD_TAG @"v0.37b"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -1543,16 +1543,6 @@ static void pipInitPegasusOnce(void);
 // v0.36：单指上下滑切上/下一集。复用系统 PiP 拖动 pan（视频主体 1 指移动会触发），
 // 当位移 predominantly 垂直且超过阈值时判定为切集手势 —— 由调用方拦截窗口拖动并发送 MR 命令。
 // 水平拖动仍走系统逻辑（移动窗口）。自由态/进度条拖动时调用方已短路，不会进这里。
-static BOOL pipIsEpisodeSwipe(UIPanGestureRecognizer *sender, NSInteger *outDir) {
-    if (sender.state != UIGestureRecognizerStateChanged) return NO;
-    CGPoint t = [sender translationInView:nil];
-    CGFloat dy = t.y, dx = fabs(t.x);
-    if (fabs(dy) < 24.0) return NO;        // 阈值：垂直位移至少 24pt 才算切集（避免误触）
-    if (fabs(dy) <= dx) return NO;         // 必须 predominantly 垂直
-    *outDir = (dy < 0) ? 1 : -1;           // 上滑(dy<0)=下一集(+1)  下滑(dy>0)=上一集(-1)
-    return YES;
-}
-
 static void pipFireEpisode(NSInteger dir) {
     if (gMRSendCommand == NULL) { PIPLog(@"episode skip 失败：MR send 不可用"); return; }
     // MRMediaRemoteCommand 标准枚举：NextTrack=4 / PreviousTrack=5。
@@ -1563,29 +1553,41 @@ static void pipFireEpisode(NSInteger dir) {
            dir > 0 ? "next" : "prev", cmd, ok);
 }
 
-// v0.37 诊断：把 episode 判定逻辑抽成函数，并在判定区内打印轨迹，便于定位「竖滑没效果」。
+// v0.37b 修复：系统 PiP 的 pan 手势 translationInView: 恒返 {0,0}（其内部自行维护/清零位移，
+// 真机 episode-probe 全程 dy=0.0 dx=0.0 为铁证）。故改为自行记录起手坐标，
+// 用 locationInView: 的实时坐标算位移（可靠）。阈值 24pt、predominantly 垂直不变。
+static CGPoint gEpisodeStart = {0, 0};
+static BOOL    gEpisodeStartSet = NO;
 static NSTimeInterval gEpisodeProbeT = 0;
 static BOOL pipHandleEpisodePan(UIPanGestureRecognizer *sender) {
     if (!gEpisodeSwipe) return NO;   // 设置关了
     if (gFreeMove)    return NO;     // 自由态：竖向滑留给自由拖动窗口
     if (gSeekBusy)    return NO;     // 进度条拖动中
+    if (sender.state == UIGestureRecognizerStateBegan) {
+        gEpisodeStart = [sender locationInView:nil];
+        gEpisodeStartSet = YES;
+        return NO;   // 起手只记录，不拦截（让系统 pan 正常起拖）
+    }
     if (sender.state == UIGestureRecognizerStateChanged) {
-        CGPoint t = [sender translationInView:nil];
+        CGPoint cur = [sender locationInView:nil];
+        CGFloat dy = gEpisodeStartSet ? (cur.y - gEpisodeStart.y) : 0;
+        CGFloat dx = gEpisodeStartSet ? fabs(cur.x - gEpisodeStart.x) : 0;
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
         if (now - gEpisodeProbeT > 0.4) {
             gEpisodeProbeT = now;
             PIPLog(@"episode-probe dy=%.1f dx=%.1f fired=%d (gEpi=%d gFree=%d gSeek=%d)",
-                   t.y, fabs(t.x), gEpisodeFired, gEpisodeSwipe, gFreeMove, gSeekBusy);
+                   dy, dx, gEpisodeFired, gEpisodeSwipe, gFreeMove, gSeekBusy);
         }
-    }
-    NSInteger dir = 0;
-    if (pipIsEpisodeSwipe(sender, &dir)) {
-        if (!gEpisodeFired) { gEpisodeFired = YES; pipFireEpisode(dir); }
-        return YES;
+        if (fabs(dy) >= 24.0 && fabs(dy) > dx) {   // 阈值 24pt 且 predominantly 垂直
+            NSInteger dir = (dy < 0) ? 1 : -1;     // 上滑(dy<0)=下一集(+1)  下滑(dy>0)=上一集(-1)
+            if (!gEpisodeFired) { gEpisodeFired = YES; pipFireEpisode(dir); }
+            return YES;   // 拦截窗口拖动，避免窗口跟着竖向滑
+        }
     }
     if (sender.state == UIGestureRecognizerStateEnded
         || sender.state == UIGestureRecognizerStateCancelled) {
         gEpisodeFired = NO;
+        gEpisodeStartSet = NO;
     }
     return NO;
 }
