@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.35"
+#define PIP_BUILD_TAG @"v0.36"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -49,6 +49,7 @@ static BOOL gFreePending = NO;       // FreeMove 偏好暂存（gFreeMove 声明
 static NSInteger gFrameColor = 1;     // 外框颜色：0 白 / 1 黑 / 2 主题青
 static CGFloat gFrameOpacity = 0.55;  // 外框不透明度（plist 存百分数，读时 /100）
 static double gSkipSeconds = 10.0;    // 左右快进退步长（秒）
+static BOOL gEpisodeSwipe = YES;      // 单指上下滑切上/下一集（全局；App 不支持时静默无效）
 
 // roothide per-app 容器隔离：Settings 里 CFPreferences 写的域，SpringBoard 读不到
 // （MapAdKiller/Oback 双双踩实）。范式同款：全局 plist 文件直读，两个进程命中同一物理文件。
@@ -84,6 +85,7 @@ static void pipReadPrefs(void) {
         double s = [v doubleValue];
         if (s >= 1.0 && s <= 60.0) gSkipSeconds = s;
     }
+    if ((v = pipPref(@"EpisodeSwipe")) != nil) gEpisodeSwipe = [v boolValue];
     if ((v = pipPref(@"FrameColor")) != nil) {
         NSInteger c = [v integerValue];
         if (c >= 0 && c <= 2) gFrameColor = c;
@@ -255,6 +257,7 @@ static void pipAdoptElapsed(double mrEla, double dur, double rate, double tNow) 
     // 其余：保留播放时钟，不覆盖（进度条贴合真实画面）
 }
 static BOOL gSeekBusy = NO;          // 拖动/seek 进行中：暂停外推，别跟用户抢进度
+static BOOL gEpisodeFired = NO;      // v0.36：本次竖向滑动是否已触发切集（防手势内重复触发）
 static double gDragTargetSec = 0;    // 拖动中的目标秒数
 static double gSeekGraceUntil = 0;   // 松手宽限期（墙上时间）：期内 gSeekBusy 保持，心跳不覆盖进度
 static double gSeekTargetSec = 0;    // 松手时 seek 的目标秒数（供宽限期后校验 App 是否真的跳过去）
@@ -1537,10 +1540,45 @@ static void pipDarwinCallback(CFNotificationCenterRef center, void *observer,
 // 一旦 ctor 时它还没进内存，整组 %init 会一起落空（SBPIP 也跟着不生效）。
 static void pipInitPegasusOnce(void);
 
+// v0.36：单指上下滑切上/下一集。复用系统 PiP 拖动 pan（视频主体 1 指移动会触发），
+// 当位移 predominantly 垂直且超过阈值时判定为切集手势 —— 由调用方拦截窗口拖动并发送 MR 命令。
+// 水平拖动仍走系统逻辑（移动窗口）。自由态/进度条拖动时调用方已短路，不会进这里。
+static BOOL pipIsEpisodeSwipe(UIPanGestureRecognizer *sender, NSInteger *outDir) {
+    if (sender.state != UIGestureRecognizerStateChanged) return NO;
+    CGPoint t = [sender translationInView:nil];
+    CGFloat dy = t.y, dx = fabs(t.x);
+    if (fabs(dy) < 24.0) return NO;        // 阈值：垂直位移至少 24pt 才算切集（避免误触）
+    if (fabs(dy) <= dx) return NO;         // 必须 predominantly 垂直
+    *outDir = (dy < 0) ? 1 : -1;           // 上滑(dy<0)=下一集(+1)  下滑(dy>0)=上一集(-1)
+    return YES;
+}
+
+static void pipFireEpisode(NSInteger dir) {
+    if (gMRSendCommand == NULL) { PIPLog(@"episode skip 失败：MR send 不可用"); return; }
+    // MRMediaRemoteCommand 标准枚举：NextTrack=4 / PreviousTrack=5。
+    // App 未实现播放列表时返回 NO，静默无效（无副作用）。B站锁屏「下一集」即走此通道。
+    int cmd = (dir > 0) ? 4 : 5;
+    BOOL ok = gMRSendCommand(cmd, nil);
+    PIPLog(@"episode skip %s → MRMediaRemoteSendCommand(%d) ok=%d",
+           dir > 0 ? "next" : "prev", cmd, ok);
+}
+
 // iOS 14+ 的 PiP 拖动入口在 SBPIPInteractionController（FreePIP 也是 hook 这两个地方）
 %hook SBPIPInteractionController
 
 - (void)handlePanGesture:(UIPanGestureRecognizer *)sender {
+    // v0.36：单指上下滑切集 —— 竖向位移超阈值即拦截系统窗口拖动并发 MR 下一/上一集命令。
+    if (gEpisodeSwipe && !gFreeMove && !gSeekBusy) {
+        NSInteger dir = 0;
+        if (pipIsEpisodeSwipe(sender, &dir)) {
+            if (!gEpisodeFired) { gEpisodeFired = YES; pipFireEpisode(dir); }
+            return;   // 拦截窗口拖动，避免窗口跟着竖向滑
+        }
+        if (sender.state == UIGestureRecognizerStateEnded
+            || sender.state == UIGestureRecognizerStateCancelled) {
+            gEpisodeFired = NO;   // 复位，允许下一次
+        }
+    }
     if (pipShouldBlockSystemPan(sender)) { PIPLog(@"system pan blocked (drag/seek)"); return; }
     %orig;
 }
@@ -1554,6 +1592,18 @@ static void pipInitPegasusOnce(void);
 // 手势会连同子视图（我们的壳）上的触摸一起收到 ⇒ 拖进度条时画中画跟着跑。
 // FreePIP（sohsatoh）解决同一问题的做法就是在这里 %orig 前加条件放行。
 - (void)_handlePanGesture:(UIPanGestureRecognizer *)sender {
+    // v0.36：单指上下滑切集（同 handlePanGesture 逻辑，两套交互控制器都要覆盖）
+    if (gEpisodeSwipe && !gFreeMove && !gSeekBusy) {
+        NSInteger dir = 0;
+        if (pipIsEpisodeSwipe(sender, &dir)) {
+            if (!gEpisodeFired) { gEpisodeFired = YES; pipFireEpisode(dir); }
+            return;
+        }
+        if (sender.state == UIGestureRecognizerStateEnded
+            || sender.state == UIGestureRecognizerStateCancelled) {
+            gEpisodeFired = NO;
+        }
+    }
     if (pipShouldBlockSystemPan(sender)) { PIPLog(@"system pan blocked (drag/seek)"); return; }
     %orig;
 }

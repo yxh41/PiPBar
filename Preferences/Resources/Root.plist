@@ -150,6 +150,26 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>手势（切上/下一集）</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>defaults</key>
+			<string>com.yxh41.pipbar</string>
+			<key>key</key>
+			<string>EpisodeSwipe</string>
+			<key>label</key>
+			<string>单指上下滑切集</string>
+			<key>default</key>
+			<true/>
+			<key>footnote</key>
+			<string>单指在画中画上向上滑=下一集、向下滑=上一集（发 MR 下一集/上一集命令；B站等支持播放列表的 App 生效，不支持时静默无效）。竖向拖动被接管为切集，窗口改由横滑拖动。自由态（长按后）不触发。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSSliderCell</string>
 			<key>defaults</key>
 			<string>com.yxh41.pipbar</string>
