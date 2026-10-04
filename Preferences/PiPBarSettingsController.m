@@ -154,9 +154,84 @@ static void pipPrefsLogImpl(NSString *line) {
 
 @end
 
+#pragma mark - 自定义开关 cell（v0.37g）
+// 为什么必须有它（真机日志实证）：PSSwitchCell 的改动**不会**回调到控制器的
+// setPreferenceValue:forSpecifier:（PiPBarPrefs.log 里两次 viewWillAppear 之间
+// 完全没有 setPreferenceValue / mirror 行，全局 plist 值纹丝不动）⇒ 开关拨了不落盘，
+// 下次进面板 viewWillAppear 的「全局 plist → suite」同步又把旧值写回 cell = 「弹回」。
+// 照抄 v0.22 已验证的滑块范式：plist 仍写 PSSwitchCell（保证框架当它是真行），
+// 由控制器在 cellForRowAtIndexPath 拦截并供 PiPSwitchCell；值直接读写全局 plist，
+// 绕开 roothide per-app NSUserDefaults 容器隔离。
+
+@protocol PiPSwitchRowDelegate <NSObject>
+- (void)pipSwitchChanged:(UISwitch *)sw specifier:(PSSpecifier *)specifier;
+@end
+
+@interface PiPSwitchCell : UITableViewCell
+@property (nonatomic, retain) PSSpecifier *pipSpecifier;
+- (void)pipRefresh;
+@end
+
+@implementation PiPSwitchCell {
+    UILabel *_titleLabel;
+    UISwitch *_sw;
+}
+
+- (instancetype)initWithStyle:(UITableViewCellStyle)style
+              reuseIdentifier:(NSString *)reuseIdentifier {
+    self = [super initWithStyle:style reuseIdentifier:reuseIdentifier];
+    if (self) {
+        self.selectionStyle = UITableViewCellSelectionStyleNone;
+        self.textLabel.hidden = YES;
+        self.detailTextLabel.hidden = YES;
+
+        _titleLabel = [[UILabel alloc] init];
+        _titleLabel.font = [UIFont systemFontOfSize:17.0];
+        _titleLabel.textColor = UIColor.labelColor;
+        [self.contentView addSubview:_titleLabel];
+
+        _sw = [[UISwitch alloc] init];
+        [_sw addTarget:self action:@selector(pipSwitchFlipped:)
+      forControlEvents:UIControlEventValueChanged];
+        self.accessoryView = _sw;
+    }
+    return self;
+}
+
+- (void)pipSwitchFlipped:(UISwitch *)sw {
+    id target = self.pipSpecifier.target;
+    if ([target conformsToProtocol:@protocol(PiPSwitchRowDelegate)]) {
+        [(id<PiPSwitchRowDelegate>)target pipSwitchChanged:sw specifier:self.pipSpecifier];
+    }
+}
+
+- (void)pipRefresh {
+    NSString *nm = self.pipSpecifier.name;
+    if (nm.length == 0) nm = [self.pipSpecifier propertyForKey:@"label"];
+    _titleLabel.text = nm;
+
+    NSString *key = [self.pipSpecifier propertyForKey:@"key"];
+    NSDictionary *g = pip_globalPrefs();
+    NSNumber *cur = (key != nil) ? [g objectForKey:key] : nil;
+    if (cur == nil) cur = [self.pipSpecifier propertyForKey:@"default"];
+    _sw.on = cur ? [cur boolValue] : NO;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat w = CGRectGetWidth(self.contentView.bounds);
+    if (w < 10.0) return;
+    CGFloat pad = 16.0;
+    CGFloat swW = CGRectGetWidth(self.accessoryView.bounds);
+    _titleLabel.frame = CGRectMake(pad, 0, w - pad * 2.0 - swW - 10.0,
+                                   CGRectGetHeight(self.contentView.bounds));
+}
+
+@end
+
 #pragma mark - 主控制器
 
-@interface PiPBarSettingsController () <PiPSliderRowDelegate>
+@interface PiPBarSettingsController () <PiPSliderRowDelegate, PiPSwitchRowDelegate>
 @end
 
 @implementation PiPBarSettingsController {
@@ -176,6 +251,12 @@ static void pipPrefsLogImpl(NSString *line) {
         || [key isEqualToString:@"FrameColor"];
 }
 
+// v0.37g：带 key 且不是滑块的行 = 开关行（分组行无 key，会被 key==nil 挡掉）
+- (BOOL)pipIsSwitchKey:(NSString *)key {
+    if (key == nil) return NO;
+    return ![self pipIsSliderKey:key];
+}
+
 // 取 indexPath 对应的 specifier（失败返回 nil，调用方回落 super）
 - (PSSpecifier *)pipSpecAt:(NSIndexPath *)indexPath {
     @try {
@@ -190,11 +271,23 @@ static void pipPrefsLogImpl(NSString *line) {
 - (UITableViewCell *)tableView:(UITableView *)tableView
          cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     PSSpecifier *spec = [self pipSpecAt:indexPath];
-    if (spec != nil && [self pipIsSliderKey:[spec propertyForKey:@"key"]]) {
+    NSString *key = [spec propertyForKey:@"key"];
+    if (spec != nil && [self pipIsSliderKey:key]) {
         PiPSliderCell *cell = [tableView dequeueReusableCellWithIdentifier:@"PiPSliderCell"];
         if (cell == nil) {
             cell = [[PiPSliderCell alloc] initWithStyle:UITableViewCellStyleDefault
                                         reuseIdentifier:@"PiPSliderCell"];
+        }
+        cell.pipSpecifier = spec;
+        [cell pipRefresh];
+        return cell;
+    }
+    // v0.37g：开关行也自己供 cell（PSSwitchCell 不回调 setPreferenceValue:，见 PiPSwitchCell 注释）
+    if (spec != nil && [self pipIsSwitchKey:key]) {
+        PiPSwitchCell *cell = [tableView dequeueReusableCellWithIdentifier:@"PiPSwitchCell"];
+        if (cell == nil) {
+            cell = [[PiPSwitchCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                        reuseIdentifier:@"PiPSwitchCell"];
         }
         cell.pipSpecifier = spec;
         [cell pipRefresh];
@@ -253,6 +346,15 @@ heightForRowAtIndexPath:(NSIndexPath *)indexPath {
         [self pipMirrorPref:key value:@(slider.value) throttle:YES];
         pipPrefsLog(@"slider %@ -> %.0f", key, (double)slider.value);
     }
+}
+
+#pragma mark - 开关回调（PiPSwitchCell 调用，直接落全局 plist）
+
+- (void)pipSwitchChanged:(UISwitch *)sw specifier:(PSSpecifier *)specifier {
+    NSString *key = [specifier propertyForKey:@"key"];
+    if (key == nil) return;
+    [self pipMirrorPref:key value:@(sw.on) throttle:NO];
+    pipPrefsLog(@"switch %@ -> %d", key, sw.on);
 }
 
 #pragma mark - 生命周期
