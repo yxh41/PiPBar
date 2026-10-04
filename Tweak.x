@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.34"
+#define PIP_BUILD_TAG @"v0.35"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -193,6 +193,10 @@ static BOOL gMRAdvancing = NO;        // 由原始 elapsed 的推进速度反推
 // 此刻 MR 仍是陈旧（较小）的 elapsed；宽限期内 pipAdoptElapsed 既不追平也不回拉，保留用户目标位，
 // 避免进度条「前进一点又被拉退一点」振荡（用户报「动一点退一点」）。声明须先于 pipAdoptElapsed。
 static double gSeekSettleUntil = 0;
+// v0.35：seek 目标位（绝对秒数，与墙上时间无关）。用户点按 seek 到该值后 App 未必立刻经 MR 上报新位置；
+// 只要 MR 回报的 elapsed 还没追上该目标，就抑制「对称回拉」、保留本地目标位（避免被陈旧 MR 值拉回）。
+// 一旦 MR 上报 ≥ 该值（App 真跳过去了）即清零，恢复正常对齐。声明须先于 pipAdoptElapsed。
+static double gSeekHoldEla = -1;
 
 // v0.29：进度条统一时间源 —— 以「播放时钟」（wall-clock × rate 累加）为准，
 // MediaRemote/Pegasus 的 elapsed 只用于：① 首次锚定 ② 真循环（接近片尾且回到片头）
@@ -208,7 +212,11 @@ static void pipAdoptElapsed(double mrEla, double dur, double rate, double tNow) 
         if (speed > 0.3) gMRAdvancing = YES;        // 明显在前进
         else if (speed < 0.05) gMRAdvancing = NO;   // 基本不动（暂停/卡住）⇒ 当作未播，避免空转外推
     }
+    double prevRaw = gMRLastRawEla;          // v0.35：拉回前保存上一次 MR elapsed，用于识别「突变回退」毛刺
     gMRLastRawEla = mrEla; gMRLastRawAt = tNow;
+    // v0.35：seek hold —— 用户点按 seek 到 gSeekHoldEla 后 App 未必立刻上报新位置；
+    // 一旦 MR 回报已 ≥ 该目标（App 真跳过去了），解除 hold，恢复正常对齐。
+    if (gSeekHoldEla >= 0 && mrEla >= gSeekHoldEla - 1.0) gSeekHoldEla = -1;
     if (gMRUpdatedAt <= 0) {            // 首次锚定（含刚进入画中画）
         gMRElapsed = mrEla > 0 ? mrEla : 0;
         gMRUpdatedAt = tNow;
@@ -219,6 +227,7 @@ static void pipAdoptElapsed(double mrEla, double dur, double rate, double tNow) 
     BOOL mrStart = (mrEla < 2.0);
     if (nearEnd && mrStart) {                 // 真循环：片尾 → 片头
         gMRElapsed = mrEla; gMRUpdatedAt = tNow;
+        gSeekHoldEla = -1;                     // v0.35：循环即解除 seek hold
     } else if (gSeekSettleUntil > tNow) {
         // v0.34：seek 宽限期内保留用户点按后的目标位，既不追平也不回拉。
         // 发 seek 命令后 App 未必立即上报新位置，此刻 MR 仍是陈旧 elapsed；
@@ -226,10 +235,22 @@ static void pipAdoptElapsed(double mrEla, double dur, double rate, double tNow) 
         // 宽限期（1.5s）过后 App 通常已上报新位置，再走正常对齐；若真不响应则回拉兜底。
     } else if (mrEla > selfEla + 1.5) {       // 播放时钟落后（曾被错误暂停等）⇒ 追平
         gMRElapsed = mrEla; gMRUpdatedAt = tNow;
-    } else if (selfEla > mrEla + 3.0) {       // ★ v0.31：播放时钟明显【领先】真实画面
-        // 解除吸附后 App 可能不响应 SetElapsedTime（或响应慢），我们本地跳了但 App 没动
-        // ⇒ 把时钟拉回真实画面，避免进度条越跑越领先视频。宽限期内的同类拉回已在上方抑制。
-        gMRElapsed = mrEla; gMRUpdatedAt = tNow;
+    } else if (selfEla > mrEla + 3.0) {       // ★ v0.31/v0.35：播放时钟明显【领先】真实画面
+        // v0.35：以下情形不打断本地走时（避免「钉在陈旧 MR 值 → 爬升 3s → 拉回」的锯齿漂移，
+        // 即用户报的「进度条跟着陈旧值反复跳/漂」）：
+        //  ① seek 宽限期（gSeekSettleUntil）        ② seek 目标未达成（gSeekHoldEla，App 还没跳到）
+        //  ③ MR elapsed 已冻结但 rate 仍报在播（gMRAdvancing==NO && rate>0.05）——
+        //     短视频 App 在 PiP 下常见 MR 回报失真（elapsed 卡死不跟视频），此时信 MR 只会把
+        //     进度条钉死在陈旧值。保留本地墙钟累加，进度条平滑走时。
+        BOOL mrFrozenButPlaying = (gMRAdvancing == NO && gMRRate > 0.05);
+        // ④ MR elapsed 突然大幅回退（>2s 且非本插件 seek 所致）= 掉线/重连毛刺（如 pid=0 瞬间 ela=0），
+        //    信它只会把进度条钉到 0 再弹回，也按「保留本地走时」处理。
+        BOOL mrGlitchBack = (mrEla < prevRaw - 2.0);
+        if (gSeekSettleUntil > tNow || gSeekHoldEla >= 0 || mrFrozenButPlaying || mrGlitchBack) {
+            // 保留本地目标位/走时，不回拉
+        } else {
+            gMRElapsed = mrEla; gMRUpdatedAt = tNow;
+        }
     }
     // 其余：保留播放时钟，不覆盖（进度条贴合真实画面）
 }
@@ -1178,8 +1199,10 @@ static NSString *pipTimeText(double sec) {
     gMRElapsed = target;
     gMRUpdatedAt = [[NSDate date] timeIntervalSinceReferenceDate];
     // v0.34：开启 seek 宽限期，抑制「对称回拉」把进度条拉回陈旧 MR 位置（动一点退一点）。
-    // App 通常在 1.5s 内上报新位置，届时经 catch-up/正常外推自然对齐；若真不响应，宽限期后回拉兜底。
+    // v0.35：同时记录 seek 目标位 gSeekHoldEla，只有 MR 回报 ≥ 该值（App 真跳过去）才解除 hold，
+    // 期间即便 App 响应慢/不响应也不把进度条拉回陈旧值。
     gSeekSettleUntil = gMRUpdatedAt + 1.5;
+    gSeekHoldEla = target;
 }
 
 // v0.30：点按画中画左半区快退、右半区快进
