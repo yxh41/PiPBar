@@ -164,7 +164,8 @@ static void pipPrefsLogImpl(NSString *line) {
 }
 
 - (BOOL)pipIsSliderKey:(NSString *)key {
-    return [key isEqualToString:@"FrameWidth"] || [key isEqualToString:@"BarHeight"];
+    return [key isEqualToString:@"FrameWidth"] || [key isEqualToString:@"BarHeight"]
+        || [key isEqualToString:@"SkipSeconds"] || [key isEqualToString:@"FrameOpacity"];
 }
 
 // 取 indexPath 对应的 specifier（失败返回 nil，调用方回落 super）

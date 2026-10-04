@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.29"
+#define PIP_BUILD_TAG @"v0.30"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -46,6 +46,9 @@ static CGFloat gBarH = 40.0;      // 底部控制条高
 static BOOL gExtendHit = YES;        // 扩展命中区：让壳外/底部黑边也能接收触摸（按钮放黑边的前提）
 static BOOL gShowBarProgress = YES;  // 显示底部可拖动进度条
 static BOOL gFreePending = NO;       // FreeMove 偏好暂存（gFreeMove 声明在后面）
+static NSInteger gFrameColor = 1;     // 外框颜色：0 白 / 1 黑 / 2 主题青
+static CGFloat gFrameOpacity = 0.55;  // 外框不透明度（plist 存百分数，读时 /100）
+static double gSkipSeconds = 10.0;    // 左右快进退步长（秒）
 
 // roothide per-app 容器隔离：Settings 里 CFPreferences 写的域，SpringBoard 读不到
 // （MapAdKiller/Oback 双双踩实）。范式同款：全局 plist 文件直读，两个进程命中同一物理文件。
@@ -76,6 +79,18 @@ static void pipReadPrefs(void) {
     if ((v = pipPref(@"BarHeight")) != nil) {
         CGFloat f = [v floatValue];
         if (f >= 20.0 && f <= 100.0) gBarH = f;
+    }
+    if ((v = pipPref(@"SkipSeconds")) != nil) {
+        double s = [v doubleValue];
+        if (s >= 1.0 && s <= 60.0) gSkipSeconds = s;
+    }
+    if ((v = pipPref(@"FrameColor")) != nil) {
+        NSInteger c = [v integerValue];
+        if (c >= 0 && c <= 2) gFrameColor = c;
+    }
+    if ((v = pipPref(@"FrameOpacity")) != nil) {
+        double o = [v doubleValue] / 100.0;   // plist 存百分数
+        if (o >= 0.1 && o <= 1.0) gFrameOpacity = o;
     }
 }
 
@@ -309,6 +324,18 @@ static void pipMRRefresh(void) {
 
 #pragma mark - 外框 + 按钮条
 
+// v0.30：外框配色（颜色预设 × 不透明度）
+static UIColor *pipFrameFill(void) {
+    switch (gFrameColor) {
+        case 0: return [UIColor colorWithWhite:1.0 alpha:gFrameOpacity];                       // 白
+        case 2: return [UIColor colorWithRed:0.0 green:0.45 blue:0.50 alpha:gFrameOpacity];     // 主题青
+        default: return [UIColor colorWithWhite:0.0 alpha:gFrameOpacity];                       // 黑
+    }
+}
+static UIColor *pipFrameEdge(void) {
+    return [UIColor colorWithWhite:1.0 alpha:0.18];   // 内沿发丝高光，任何底色上都分隔
+}
+
 @interface PIPFrameView : UIView <UIGestureRecognizerDelegate>
 @property (nonatomic, strong) CAShapeLayer *caseLayer;
 @property (nonatomic, strong) CAShapeLayer *edgeLayer;
@@ -330,6 +357,8 @@ static void pipMRRefresh(void) {
 @property (nonatomic, strong) CAShapeLayer *closeXLayer;     // 白色 ✕（两条线）
 @property (nonatomic, assign) CGRect closeFrame;             // 关闭按钮命中区（本壳坐标系）
 @property (nonatomic, strong) UITapGestureRecognizer *closeTap;
+// v0.30：点按画中画左半区快退、右半区快进（步长 gSkipSeconds）
+@property (nonatomic, strong) UITapGestureRecognizer *skipTap;
 // v0.11：外框矩形（本壳坐标系，含底部黑边）—— 供 pointInside 扩展命中区用
 @property (nonatomic, assign) CGRect hitRect;
 // v0.15：拖动中（此时进度由手指决定，不被心跳覆盖）
@@ -565,6 +594,11 @@ static void pipSwizzlePointInsideOn(Class cls) {
         self.seekTap.delegate = self;
         [self addGestureRecognizer:self.seekPan];
         [self addGestureRecognizer:self.seekTap];
+        // v0.30：左右点按快进退（视频主体）
+        self.skipTap = [[UITapGestureRecognizer alloc] initWithTarget:self
+                                                                action:@selector(pipSkipTap:)];
+        self.skipTap.delegate = self;
+        [self addGestureRecognizer:self.skipTap];
 
         // v0.16：FreePIP 式长按解吸 + 自由拖动 + 双指缩放
         gFreeLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self
@@ -625,6 +659,15 @@ static void pipSwizzlePointInsideOn(Class cls) {
             CGRect hot = CGRectInset(self.trackRect, -8.0, -20.0);
             if (CGRectContainsPoint(hot, point)) return self;
         }
+        // v0.30：视频主体（左/右半区）交给本壳 —— 点按左/右快进退。
+        // 拖动仍由系统 pan（挂在窗口祖先上）接管窗口 ⇒ 既保留拖动换位、又支持点按快进退。
+        if (CGRectGetWidth(self.trackRect) > 1.0) {
+            UIView *host = gVideoHost;
+            if (host != nil) {
+                CGRect vr = [host convertRect:host.bounds toView:self];
+                if (CGRectContainsPoint(vr, point)) return self;
+            }
+        }
         return nil;
     }
     return hit;
@@ -667,6 +710,17 @@ static void pipSwizzlePointInsideOn(Class cls) {
             return CGRectContainsPoint(hot, [gr locationInView:self]);
         }
         return NO;
+    }
+    if (gr == self.skipTap) {
+        // 进度条热区交给 seekTap；关闭按钮交给 closeTap；其余（视频主体）才归快进退
+        CGPoint p = [gr locationInView:self];
+        if (CGRectGetWidth(self.trackRect) > 1.0) {
+            CGRect hot = CGRectInset(self.trackRect, -8.0, -20.0);
+            if (CGRectContainsPoint(hot, p)) return NO;
+        }
+        if (gFreeMove && !CGRectIsEmpty(self.closeFrame)
+            && CGRectContainsPoint(self.closeFrame, p)) return NO;
+        return YES;
     }
     if (gr == gFreePan) {
         // v0.26：从关闭按钮起手不要拖着窗口跑（按钮优先）
@@ -937,7 +991,7 @@ static NSString *pipTimeText(double sec) {
             if (target < cur - 0.5) {
                 // v0.24：后退 seek —— 部分 App 不响应后退方向的 MRMediaRemoteSetElapsedTime，
                 // 改用 Pegasus 原生 skipByInterval（负间隔，与系统「快退」同机制）后退到目标位。
-                [self pipSeekBackByInterval:(target - cur)];
+                [self pipSeekByInterval:(target - cur)];
                 PIPLog(@"seek(back) -> target=%.2fs / %.2fs（%.0f%%）",
                        target, gMRDuration, gMRDuration > 0 ? target / gMRDuration * 100.0 : 0);
             } else {
@@ -1027,6 +1081,42 @@ static NSString *pipTimeText(double sec) {
     PIPLog(@"skipByInterval 兜底：后退 %.2fs（action=1）", delta);
 }
 
+// v0.30：左右点按快进退统一入口（前进用 SetElapsedTime，后退用 skipByInterval，均已在 seek 验证）
+- (void)pipSeekByInterval:(double)sec {
+    if (gMRDuration <= 1.0) return;
+    double cur = [self pipCurrentSeconds];
+    double target = cur + sec;
+    if (target < 0) target = 0;
+    if (target > gMRDuration) target = gMRDuration;
+    if (sec < 0) {
+        [self pipSeekBackByInterval:sec];   // 后退：Pegasus skipByInterval（已验证）
+    } else {
+        if (gMRSetElapsedTime != NULL) {
+            gMRSetElapsedTime(target);
+            gMRElapsed = target;
+            gMRUpdatedAt = [[NSDate date] timeIntervalSinceReferenceDate];
+            PIPLog(@"skip +%.1fs → SetElapsedTime %.1f", sec, target);
+        } else {
+            [self pipSeekBackByInterval:sec];
+        }
+    }
+}
+
+// v0.30：点按画中画左半区快退、右半区快进
+- (void)pipSkipTap:(UITapGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateEnded) return;
+    if (gMRDuration <= 1.0) return;          // 直播/无总时长不跳
+    UIView *host = gVideoHost;
+    if (host == nil) return;
+    CGRect vr = [host convertRect:host.bounds toView:self];
+    if (vr.size.width < 8.0) return;
+    CGPoint p = [gr locationInView:self];
+    if (!CGRectContainsPoint(vr, p)) return; // 只认视频主体（底部条/关闭按钮已被仲裁排除）
+    BOOL left = (p.x < CGRectGetMidX(vr));
+    [self pipSeekByInterval:left ? -gSkipSeconds : gSkipSeconds];
+    PIPLog(@"skip tap %@ %.0fs", left ? @"←后退" : @"前进→", gSkipSeconds);
+}
+
 // 全部按【当前视频矩形 + 当前偏好】重算 —— 偏好热更新也走这里（setNeedsLayout）
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -1082,6 +1172,9 @@ static NSString *pipTimeText(double sec) {
         self.caseLayer.shadowPath = nil;   // v0.6：无投影（蒙灰根因已删）
         // sw==0 时不画内沿高光（否则 even-odd 外圈与内洞重合，边缘会留一圈发丝描边）
         self.edgeLayer.path = (sw >= 0.5) ? ip.CGPath : nil;
+        // v0.30：外框配色（颜色预设 × 不透明度），偏好热更新经 setNeedsLayout 重算
+        self.caseLayer.fillColor = pipFrameFill().CGColor;
+        self.edgeLayer.strokeColor = pipFrameEdge().CGColor;
     } else {
         self.caseLayer.path = nil;
         self.edgeLayer.path = nil;

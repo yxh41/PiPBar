@@ -130,6 +130,72 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>defaults</key>
+			<string>com.yxh41.pipbar</string>
+			<key>key</key>
+			<string>SkipSeconds</string>
+			<key>label</key>
+			<string>快进/快退步长（秒）</string>
+			<key>height</key>
+			<real>80</real>
+			<key>min</key>
+			<real>5</real>
+			<key>max</key>
+			<real>60</real>
+			<key>default</key>
+			<real>10</real>
+			<key>footnote</key>
+			<string>点按画中画左半区快退、右半区快进该步长（秒）。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSegmentCell</string>
+			<key>defaults</key>
+			<string>com.yxh41.pipbar</string>
+			<key>key</key>
+			<string>FrameColor</string>
+			<key>label</key>
+			<string>外框颜色</string>
+			<key>default</key>
+			<string>1</string>
+			<key>values</key>
+			<array>
+				<string>0</string>
+				<string>1</string>
+				<string>2</string>
+			</array>
+			<key>titles</key>
+			<array>
+				<string>白</string>
+				<string>黑</string>
+				<string>青</string>
+			</array>
+			<key>footnote</key>
+			<string>白 / 黑 / 主题青。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>defaults</key>
+			<string>com.yxh41.pipbar</string>
+			<key>key</key>
+			<string>FrameOpacity</string>
+			<key>label</key>
+			<string>外框不透明度（%）</string>
+			<key>height</key>
+			<real>80</real>
+			<key>min</key>
+			<real>10</real>
+			<key>max</key>
+			<real>100</real>
+			<key>default</key>
+			<real>55</real>
+			<key>footnote</key>
+			<string>外框填充的不透明度，百分数。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
 			<string>日志（排障用）</string>
