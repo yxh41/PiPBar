@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.37d"
+#define PIP_BUILD_TAG @"v0.37e"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -1565,6 +1565,7 @@ static void pipFireEpisode(NSInteger dir) {
 static CGPoint gEpisodeStart = {0, 0};
 static BOOL    gEpisodeStartSet = NO;
 static NSTimeInterval gEpisodeProbeT = 0;
+static NSTimeInterval gEpisodeNoListT = 0;   // v0.37e：list=0 的 noop 提示节流
 static BOOL pipHandleEpisodePan(UIPanGestureRecognizer *sender) {
     // 任何短路分支都要清掉 gEpisodeActive，避免它卡住导致系统 pan（移窗）被永久阻断
     if (!gEpisodeSwipe) { gEpisodeActive = NO; return NO; }   // 设置关了
@@ -1572,6 +1573,20 @@ static BOOL pipHandleEpisodePan(UIPanGestureRecognizer *sender) {
     if (gSeekBusy)      { gEpisodeActive = NO; return NO; }   // 进度条拖动中
     PIPFrameView *cv = gInstalledFrame;
     if (cv == nil) { gEpisodeActive = NO; return NO; }        // 没壳就无从换算，放行系统逻辑
+    // v0.37e 智能分流：App 未上报播放列表(list=0，即 [kMRKeyTotalTracks]<=1) 时**完全不接管**
+    // 竖向滑动 —— 竖滑照旧用于移动窗口，也不发必然无效的 MR 切集命令。
+    // 理由：切集只在「既用画中画、又注册了 MR 上一首/下一首」的 App 上才可能生效，交集很窄；
+    // 而无条件接管会吃掉竖向拖窗（≥10pt 就拦系统 pan），对不支持的 App 是纯损失。
+    // 只在 App 真有播放列表(list=1) 时才占用竖向滑动，代价与收益对齐。
+    if (!gMRHasPlaylist) {
+        gEpisodeActive = NO;
+        NSTimeInterval nt = [[NSDate date] timeIntervalSince1970];
+        if (nt - gEpisodeNoListT > 2.0) {
+            gEpisodeNoListT = nt;
+            PIPLog(@"episode noop: list=0（App 无播放列表）→ 不接管，竖滑照旧移窗");
+        }
+        return NO;
+    }
     if (sender.state == UIGestureRecognizerStateChanged) {
         CGPoint cur = [sender locationInView:cv];
         if (!gEpisodeStartSet) {     // 没收到 Began 也能建立基线（兜底）
