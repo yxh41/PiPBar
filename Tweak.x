@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.37b"
+#define PIP_BUILD_TAG @"v0.37c"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -1553,9 +1553,11 @@ static void pipFireEpisode(NSInteger dir) {
            dir > 0 ? "next" : "prev", cmd, ok);
 }
 
-// v0.37b 修复：系统 PiP 的 pan 手势 translationInView: 恒返 {0,0}（其内部自行维护/清零位移，
-// 真机 episode-probe 全程 dy=0.0 dx=0.0 为铁证）。故改为自行记录起手坐标，
-// 用 locationInView: 的实时坐标算位移（可靠）。阈值 24pt、predominantly 垂直不变。
+// v0.37c 修复：对该系统 pan 手势，**给 locationInView:/translationInView: 传 nil 恒返 {0,0}**
+// （真机 episode-probe 全程 dy=0.0 dx=0.0）。但同一份日志里 pipSystemPanHitHotZone 用
+// `[sender locationInView:cv]`（cv=gInstalledFrame）判出的 hot=1 **完全正确** ⇒
+// 根因是「传 nil」，不是手势本身没有位移。故改为对**真实 view(gInstalledFrame)** 取坐标，
+// 并自行记录起手位置算 dy/dx。阈值 24pt、predominantly 垂直不变。
 static CGPoint gEpisodeStart = {0, 0};
 static BOOL    gEpisodeStartSet = NO;
 static NSTimeInterval gEpisodeProbeT = 0;
@@ -1563,20 +1565,23 @@ static BOOL pipHandleEpisodePan(UIPanGestureRecognizer *sender) {
     if (!gEpisodeSwipe) return NO;   // 设置关了
     if (gFreeMove)    return NO;     // 自由态：竖向滑留给自由拖动窗口
     if (gSeekBusy)    return NO;     // 进度条拖动中
-    if (sender.state == UIGestureRecognizerStateBegan) {
-        gEpisodeStart = [sender locationInView:nil];
-        gEpisodeStartSet = YES;
-        return NO;   // 起手只记录，不拦截（让系统 pan 正常起拖）
-    }
+    PIPFrameView *cv = gInstalledFrame;
+    if (cv == nil) return NO;        // 没壳就无从换算，放行系统逻辑
     if (sender.state == UIGestureRecognizerStateChanged) {
-        CGPoint cur = [sender locationInView:nil];
-        CGFloat dy = gEpisodeStartSet ? (cur.y - gEpisodeStart.y) : 0;
-        CGFloat dx = gEpisodeStartSet ? fabs(cur.x - gEpisodeStart.x) : 0;
+        CGPoint cur = [sender locationInView:cv];
+        if (!gEpisodeStartSet) {     // 没收到 Began 也能建立基线（兜底）
+            gEpisodeStart = cur;
+            gEpisodeStartSet = YES;
+            return NO;
+        }
+        CGFloat dy = cur.y - gEpisodeStart.y;
+        CGFloat dx = fabs(cur.x - gEpisodeStart.x);
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
         if (now - gEpisodeProbeT > 0.4) {
             gEpisodeProbeT = now;
-            PIPLog(@"episode-probe dy=%.1f dx=%.1f fired=%d (gEpi=%d gFree=%d gSeek=%d)",
-                   dy, dx, gEpisodeFired, gEpisodeSwipe, gFreeMove, gSeekBusy);
+            PIPLog(@"episode-probe dy=%.1f dx=%.1f set=%d cur=(%.0f,%.0f) start=(%.0f,%.0f) fired=%d (gEpi=%d gFree=%d gSeek=%d)",
+                   dy, dx, gEpisodeStartSet, cur.x, cur.y, gEpisodeStart.x, gEpisodeStart.y,
+                   gEpisodeFired, gEpisodeSwipe, gFreeMove, gSeekBusy);
         }
         if (fabs(dy) >= 24.0 && fabs(dy) > dx) {   // 阈值 24pt 且 predominantly 垂直
             NSInteger dir = (dy < 0) ? 1 : -1;     // 上滑(dy<0)=下一集(+1)  下滑(dy>0)=上一集(-1)
