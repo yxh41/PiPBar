@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.31"
+#define PIP_BUILD_TAG @"v0.32"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -354,6 +354,18 @@ static UIColor *pipFrameEdge(void) {
     return [UIColor colorWithWhite:1.0 alpha:0.18];   // 内沿发丝高光，任何底色上都分隔
 }
 
+// v0.32：点按快进退的命中分区 —— 仅视频左右两侧（外 35%）归我们快进退，
+// 中间 30% 留作死区交给系统原生 PiP 控制（播放/暂停等）。返回 -1=左(快退) / 1=右(快进) / 0=中间死区。
+static NSInteger pipSkipZone(CGPoint p, CGRect vr) {
+    if (vr.size.width < 8.0) return 0;
+    CGFloat w = vr.size.width;
+    CGFloat leftEdge  = CGRectGetMinX(vr) + w * 0.35;
+    CGFloat rightEdge = CGRectGetMaxX(vr) - w * 0.35;
+    if (p.x < leftEdge)  return -1;
+    if (p.x > rightEdge) return 1;
+    return 0;
+}
+
 @interface PIPFrameView : UIView <UIGestureRecognizerDelegate>
 @property (nonatomic, strong) CAShapeLayer *caseLayer;
 @property (nonatomic, strong) CAShapeLayer *edgeLayer;
@@ -597,6 +609,7 @@ static void pipSwizzlePointInsideOn(Class cls) {
         self.timeLabel = [[UILabel alloc] initWithFrame:CGRectZero];
         self.timeLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.0 weight:UIFontWeightMedium];
         self.timeLabel.textColor = UIColor.whiteColor;
+        [self pipApplyProgressColors];   // v0.32：按外框颜色定初始进度条配色
         self.timeLabel.textAlignment = NSTextAlignmentCenter;
         self.timeLabel.hidden = YES;
         [self addSubview:self.timeLabel];
@@ -677,13 +690,18 @@ static void pipSwizzlePointInsideOn(Class cls) {
             CGRect hot = CGRectInset(self.trackRect, -8.0, -20.0);
             if (CGRectContainsPoint(hot, point)) return self;
         }
-        // v0.30：视频主体（左/右半区）交给本壳 —— 点按左/右快进退。
+        // v0.32：视频主体 —— 仅左右两侧（外 35%）归本壳接管快进退，
+        // 中间 30% 留作死区穿透给系统原生 PiP 控制（播放/暂停等），否则系统自带控制条点不到。
         // 拖动仍由系统 pan（挂在窗口祖先上）接管窗口 ⇒ 既保留拖动换位、又支持点按快进退。
         if (CGRectGetWidth(self.trackRect) > 1.0) {
             UIView *host = gVideoHost;
             if (host != nil) {
                 CGRect vr = [host convertRect:host.bounds toView:self];
-                if (CGRectContainsPoint(vr, point)) return self;
+                if (CGRectContainsPoint(vr, point)) {
+                    NSInteger zone = pipSkipZone(point, vr);
+                    if (zone != 0) return self;   // 左/右 → 接管快进退
+                    return nil;                   // 中间死区 → 穿透给系统原生控制
+                }
             }
         }
         return nil;
@@ -738,6 +756,12 @@ static void pipSwizzlePointInsideOn(Class cls) {
         }
         if (gFreeMove && !CGRectIsEmpty(self.closeFrame)
             && CGRectContainsPoint(self.closeFrame, p)) return NO;
+        // v0.32：中间死区（交给系统原生控制）不让本手势起手，避免吞掉系统自带控制条的点击
+        UIView *host = gVideoHost;
+        if (host != nil) {
+            CGRect vr = [host convertRect:host.bounds toView:self];
+            if (vr.size.width >= 8.0 && pipSkipZone(p, vr) == 0) return NO;
+        }
         return YES;
     }
     if (gr == gFreePan) {
@@ -982,6 +1006,22 @@ static NSString *pipTimeText(double sec) {
     }
 }
 
+// v0.32：进度条配色随外框反色 —— 外框为白色（0）时改用深色，否则白色；
+// 否则白底白条在白色皮肤下完全看不见。thumb / 时间标签同步反色。
+- (void)pipApplyProgressColors {
+    if (gFrameColor == 0) {
+        self.trackLayer.fillColor = [UIColor colorWithWhite:0.0 alpha:0.22].CGColor;
+        self.fillLayer.fillColor  = [UIColor colorWithWhite:0.0 alpha:0.85].CGColor;
+        self.thumbLayer.backgroundColor = [UIColor colorWithWhite:0.12 alpha:1.0].CGColor;
+        self.timeLabel.textColor = [UIColor colorWithWhite:0.12 alpha:1.0];
+    } else {
+        self.trackLayer.fillColor = [UIColor colorWithWhite:1.0 alpha:0.22].CGColor;
+        self.fillLayer.fillColor  = [UIColor colorWithWhite:1.0 alpha:0.92].CGColor;
+        self.thumbLayer.backgroundColor = [UIColor whiteColor].CGColor;
+        self.timeLabel.textColor = [UIColor whiteColor];
+    }
+}
+
 // 拖动/点按 → 计算目标秒数 → 拖动中实时显示，松手才真正 seek
 - (void)pipSeekGesture:(UIGestureRecognizer *)gr {
     CGFloat w = CGRectGetWidth(self.trackRect);
@@ -1134,9 +1174,11 @@ static NSString *pipTimeText(double sec) {
     if (vr.size.width < 8.0) return;
     CGPoint p = [gr locationInView:self];
     if (!CGRectContainsPoint(vr, p)) return; // 只认视频主体（底部条/关闭按钮已被仲裁排除）
-    BOOL left = (p.x < CGRectGetMidX(vr));
-    [self pipSeekByInterval:left ? -gSkipSeconds : gSkipSeconds];
-    PIPLog(@"skip tap %@ %.0fs", left ? @"←后退" : @"前进→", gSkipSeconds);
+    // v0.32：中间死区不快进退（交给系统原生控制），仅左右两侧生效
+    NSInteger zone = pipSkipZone(p, vr);
+    if (zone == 0) return;
+    [self pipSeekByInterval:zone < 0 ? -gSkipSeconds : gSkipSeconds];
+    PIPLog(@"skip tap %@ %.0fs", zone < 0 ? @"←后退" : @"前进→", gSkipSeconds);
 }
 
 // 全部按【当前视频矩形 + 当前偏好】重算 —— 偏好热更新也走这里（setNeedsLayout）
@@ -1222,6 +1264,7 @@ static NSString *pipTimeText(double sec) {
         self.trackLayer.path = nil;
     }
     self.barLayer.hidden = YES;   // 胶囊底衬随按钮一起退场
+    [self pipApplyProgressColors];   // v0.32：外框颜色热更新时同步进度条反色
     [self pipRefreshProgress];
 
     // 按钮已移除：把残留的 UIButton 一并清掉（防御：老版本装过的话）
