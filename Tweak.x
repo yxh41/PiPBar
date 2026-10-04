@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.36"
+#define PIP_BUILD_TAG @"v0.37"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -86,6 +86,7 @@ static void pipReadPrefs(void) {
         if (s >= 1.0 && s <= 60.0) gSkipSeconds = s;
     }
     if ((v = pipPref(@"EpisodeSwipe")) != nil) gEpisodeSwipe = [v boolValue];
+    PIPLog(@"pref EpisodeSwipe=%d (raw=%@)", gEpisodeSwipe, v);
     if ((v = pipPref(@"FrameColor")) != nil) {
         NSInteger c = [v integerValue];
         if (c >= 0 && c <= 2) gFrameColor = c;
@@ -1563,23 +1564,44 @@ static void pipFireEpisode(NSInteger dir) {
            dir > 0 ? "next" : "prev", cmd, ok);
 }
 
+// v0.37 诊断：把 episode 判定逻辑抽成函数，并在判定区内打印轨迹，便于定位「竖滑没效果」。
+static NSTimeInterval gEpisodeProbeT = 0;
+static BOOL pipHandleEpisodePan(UIPanGestureRecognizer *sender) {
+    if (!gEpisodeSwipe) return NO;   // 设置关了
+    if (gFreeMove)    return NO;     // 自由态：竖向滑留给自由拖动窗口
+    if (gSeekBusy)    return NO;     // 进度条拖动中
+    if (sender.state == UIGestureRecognizerStateChanged) {
+        CGPoint t = [sender translationInView:nil];
+        NSTimeInterval now = [NSDate timeIntervalSince1970];
+        if (now - gEpisodeProbeT > 0.4) {
+            gEpisodeProbeT = now;
+            PIPLog(@"episode-probe dy=%.1f dx=%.1f fired=%d (gEpi=%d gFree=%d gSeek=%d)",
+                   t.y, fabs(t.x), gEpisodeFired, gEpisodeSwipe, gFreeMove, gSeekBusy);
+        }
+    }
+    NSInteger dir = 0;
+    if (pipIsEpisodeSwipe(sender, &dir)) {
+        if (!gEpisodeFired) { gEpisodeFired = YES; pipFireEpisode(dir); }
+        return YES;
+    }
+    if (sender.state == UIGestureRecognizerStateEnded
+        || sender.state == UIGestureRecognizerStateCancelled) {
+        gEpisodeFired = NO;
+    }
+    return NO;
+}
+
 // iOS 14+ 的 PiP 拖动入口在 SBPIPInteractionController（FreePIP 也是 hook 这两个地方）
 %hook SBPIPInteractionController
 
 - (void)handlePanGesture:(UIPanGestureRecognizer *)sender {
     // v0.36：单指上下滑切集 —— 竖向位移超阈值即拦截系统窗口拖动并发 MR 下一/上一集命令。
-    if (gEpisodeSwipe && !gFreeMove && !gSeekBusy) {
-        NSInteger dir = 0;
-        if (pipIsEpisodeSwipe(sender, &dir)) {
-            if (!gEpisodeFired) { gEpisodeFired = YES; pipFireEpisode(dir); }
-            return;   // 拦截窗口拖动，避免窗口跟着竖向滑
-        }
-        if (sender.state == UIGestureRecognizerStateEnded
-            || sender.state == UIGestureRecognizerStateCancelled) {
-            gEpisodeFired = NO;   // 复位，允许下一次
-        }
+    if (pipHandleEpisodePan(sender)) { PIPLog(@"episode consumed (vertical swipe)"); return; }
+    if (pipShouldBlockSystemPan(sender)) {
+        PIPLog(@"system pan blocked: free=%d seek=%d hot=%d",
+               gFreeMove, gSeekBusy, pipSystemPanHitHotZone(sender));
+        return;
     }
-    if (pipShouldBlockSystemPan(sender)) { PIPLog(@"system pan blocked (drag/seek)"); return; }
     %orig;
 }
 
@@ -1593,18 +1615,12 @@ static void pipFireEpisode(NSInteger dir) {
 // FreePIP（sohsatoh）解决同一问题的做法就是在这里 %orig 前加条件放行。
 - (void)_handlePanGesture:(UIPanGestureRecognizer *)sender {
     // v0.36：单指上下滑切集（同 handlePanGesture 逻辑，两套交互控制器都要覆盖）
-    if (gEpisodeSwipe && !gFreeMove && !gSeekBusy) {
-        NSInteger dir = 0;
-        if (pipIsEpisodeSwipe(sender, &dir)) {
-            if (!gEpisodeFired) { gEpisodeFired = YES; pipFireEpisode(dir); }
-            return;
-        }
-        if (sender.state == UIGestureRecognizerStateEnded
-            || sender.state == UIGestureRecognizerStateCancelled) {
-            gEpisodeFired = NO;
-        }
+    if (pipHandleEpisodePan(sender)) { PIPLog(@"episode consumed (vertical swipe)"); return; }
+    if (pipShouldBlockSystemPan(sender)) {
+        PIPLog(@"system pan blocked: free=%d seek=%d hot=%d",
+               gFreeMove, gSeekBusy, pipSystemPanHitHotZone(sender));
+        return;
     }
-    if (pipShouldBlockSystemPan(sender)) { PIPLog(@"system pan blocked (drag/seek)"); return; }
     %orig;
 }
 
