@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.37g"
+#define PIP_BUILD_TAG @"v0.37h"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -96,7 +96,9 @@ static void pipReadPrefs(void) {
     }
 }
 
-// —— 日志：syslog 恒开（量小），文件日志受 FileLog 开关控制 ——
+// —— 日志：v0.37h 起「文件日志」升级为**日志总开关**，同时管 syslog 与文件 ——
+// 旧行为：syslog(NSLog) 恒开、只有文件写受 gFileLog 拦 ⇒ 用户把开关关了 syslog 仍在刷，
+// 表现就是「日志开关关不掉」。现在 PIPLog 整体被 gFileLog 拦，关掉即彻底静默。
 static void pipFileWrite(NSString *line) {
     if (!gFileLog) return;
     @try {
@@ -123,10 +125,21 @@ static void pipFileWrite(NSString *line) {
     } @catch (NSException *e) { /* 文件日志失败不影响主流程 */ }
 }
 
+// 常规日志：受「日志总开关(FileLog)」控制，关掉后 syslog 与文件都不再产出。
 #define PIPLog(fmt, ...) do { \
-    NSString *l = [NSString stringWithFormat:fmt, ##__VA_ARGS__]; \
-    NSLog(@"[PiPBar " PIP_BUILD_TAG "] %@", l); \
-    pipFileWrite(l); \
+    if (gFileLog) { \
+        NSString *l = [NSString stringWithFormat:fmt, ##__VA_ARGS__]; \
+        NSLog(@"[PiPBar " PIP_BUILD_TAG "] %@", l); \
+        pipFileWrite(l); \
+    } \
+} while (0)
+
+// 启动横幅：**不受开关影响**，每次 respring 仅 1 行 syslog。
+// 保留它是为了「当前装的到底是哪个 build」永远可查 —— 用户多次装错过版本，
+// 这行带 build tag，是唯一的兜底证据。文件侧仍不写（开关关了就不落盘）。
+#define PIPLogBoot(fmt, ...) do { \
+    NSLog(@"[PiPBar " PIP_BUILD_TAG "] %@", \
+          [NSString stringWithFormat:fmt, ##__VA_ARGS__]); \
 } while (0)
 
 // —— Pegasus / SpringBoard 私有类（@interface 只给编译器看类型；类一律运行时解析）——
@@ -1858,7 +1871,7 @@ static void pipInitPegasusOnce(void) {
         CFNotificationCenterGetDarwinNotifyCenter(), NULL,
         pipDarwinCallback, CFSTR(PIP_NOTIFY), NULL,
         CFNotificationSuspensionBehaviorDeliverImmediately);
-    PIPLog(@"loaded for SpringBoard | build=" PIP_BUILD_TAG
-           " enabled=%d frame=%d progress=%d w=%.0f barh=%.0f filelog=%d",
-           gEnabled, gShowFrame, gShowBarProgress, (double)gFrameW, (double)gBarH, gFileLog);
+    PIPLogBoot(@"loaded for SpringBoard | build=" PIP_BUILD_TAG
+               " enabled=%d frame=%d progress=%d w=%.0f barh=%.0f filelog=%d",
+               gEnabled, gShowFrame, gShowBarProgress, (double)gFrameW, (double)gBarH, gFileLog);
 }

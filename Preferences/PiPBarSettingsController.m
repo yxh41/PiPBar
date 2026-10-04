@@ -27,7 +27,17 @@
 
 // 设置面板自己的文件日志（独立文件，方便与 tweak 日志一起回传）
 // 上限 256KB，超过自动清空重记。
-static void pipPrefsLogImpl(NSString *line) {
+//
+// v0.37h：与 tweak 共用同一个总开关（全局 plist 的 FileLog）。旧版本里面板日志无条件
+// 写 syslog + 落盘，于是用户把「文件日志」关了，syslog 仍被面板刷 —— 与 tweak 侧的
+// 「syslog 恒开」是同一个「关不掉」的两半。现在关掉 FileLog ⇒ 面板侧也彻底静默。
+//   force=YES 例外：只给「开关被拨动」那一行用。否则「关闭日志」这个动作本身
+//   连一条痕迹都不留 —— 而它恰恰是最需要留证的一次操作。
+static void pipPrefsLogEx(BOOL force, NSString *line) {
+    if (!force) {
+        id v = pip_globalPrefs()[@"FileLog"];
+        if (v != nil && [v boolValue] == NO) return;
+    }
     @try {
         NSString *path = @"/var/mobile/Library/Logs/PiPBarPrefs.log";
         NSFileManager *fm = NSFileManager.defaultManager;
@@ -50,7 +60,8 @@ static void pipPrefsLogImpl(NSString *line) {
     } @catch (NSException *e) { /* 忽略 */ }
 }
 
-#define pipPrefsLog(fmt, ...) pipPrefsLogImpl([NSString stringWithFormat:fmt, ##__VA_ARGS__])
+#define pipPrefsLog(fmt, ...)      pipPrefsLogEx(NO,  [NSString stringWithFormat:fmt, ##__VA_ARGS__])
+#define pipPrefsLogForce(fmt, ...) pipPrefsLogEx(YES, [NSString stringWithFormat:fmt, ##__VA_ARGS__])
 
 #pragma mark - 自定义滑块 cell（参考图布局，由控制器直接供出）
 
@@ -354,7 +365,7 @@ heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     NSString *key = [specifier propertyForKey:@"key"];
     if (key == nil) return;
     [self pipMirrorPref:key value:@(sw.on) throttle:NO];
-    pipPrefsLog(@"switch %@ -> %d", key, sw.on);
+    pipPrefsLogForce(@"switch %@ -> %d", key, sw.on);
 }
 
 #pragma mark - 生命周期
