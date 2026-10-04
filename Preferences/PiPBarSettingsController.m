@@ -220,7 +220,10 @@ heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     NSMutableDictionary *d = [NSMutableDictionary dictionaryWithContentsOfFile:kPIPGlobalPlist];
     if (d == nil) d = [NSMutableDictionary dictionary];
     if (value) d[key] = value; else [d removeObjectForKey:key];
-    [d writeToFile:kPIPGlobalPlist atomically:YES];
+    BOOL ok = [d writeToFile:kPIPGlobalPlist atomically:YES];
+    // v0.37f 诊断：回读校验，确认值真的落到全局 plist（而不是写完就没了）
+    NSDictionary *back = [NSDictionary dictionaryWithContentsOfFile:kPIPGlobalPlist];
+    pipPrefsLog(@"mirror key=%@ value=%@ write=%d back=%@", key, value, ok, back[key]);
 
     BOOL post = YES;
     if (throttle) {
@@ -259,6 +262,8 @@ heightForRowAtIndexPath:(NSIndexPath *)indexPath {
 - (void)setPreferenceValue:(id)value forSpecifier:(PSSpecifier *)specifier {
     [super setPreferenceValue:value forSpecifier:specifier];
     NSString *key = [specifier propertyForKey:@"key"];
+    // v0.37f 诊断：先确认框架到底有没有回调到这里（没这行 = 开关改动根本没进写入流程）
+    pipPrefsLog(@"setPreferenceValue key=%@ value=%@", key, value);
     if (key == nil) return;
     [self pipMirrorPref:key value:value throttle:NO];
 }
@@ -278,9 +283,14 @@ heightForRowAtIndexPath:(NSIndexPath *)indexPath {
         NSString *key = [spec propertyForKey:@"key"];
         if (!key) continue;
         id val = global[key];
-        if (val) [d setObject:val forKey:key];
+        if (val) {
+            [d setObject:val forKey:key];
+            pipPrefsLog(@"sync %@=%@", key, val);
+        }
     }
-    pipPrefsLog(@"viewWillAppear: specifiers=%d（全局 plist → suite 单向同步）",
+    // v0.37f：临时 NSUserDefaults 不显式同步可能不落盘 ⇒ 下次进面板 cell 又读回旧值（表现为「弹回」）
+    [d synchronize];
+    pipPrefsLog(@"viewWillAppear: specifiers=%d（全局 plist → suite 单向同步，已 synchronize）",
                 (int)_specifiers.count);
 }
 
