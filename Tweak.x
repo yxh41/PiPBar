@@ -86,7 +86,6 @@ static void pipReadPrefs(void) {
         if (s >= 1.0 && s <= 60.0) gSkipSeconds = s;
     }
     if ((v = pipPref(@"EpisodeSwipe")) != nil) gEpisodeSwipe = [v boolValue];
-    PIPLog(@"pref EpisodeSwipe=%d (raw=%@)", gEpisodeSwipe, v);
     if ((v = pipPref(@"FrameColor")) != nil) {
         NSInteger c = [v integerValue];
         if (c >= 0 && c <= 2) gFrameColor = c;
@@ -1572,7 +1571,7 @@ static BOOL pipHandleEpisodePan(UIPanGestureRecognizer *sender) {
     if (gSeekBusy)    return NO;     // 进度条拖动中
     if (sender.state == UIGestureRecognizerStateChanged) {
         CGPoint t = [sender translationInView:nil];
-        NSTimeInterval now = [NSDate timeIntervalSince1970];
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
         if (now - gEpisodeProbeT > 0.4) {
             gEpisodeProbeT = now;
             PIPLog(@"episode-probe dy=%.1f dx=%.1f fired=%d (gEpi=%d gFree=%d gSeek=%d)",
