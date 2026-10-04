@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.33"
+#define PIP_BUILD_TAG @"v0.34"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -189,6 +189,10 @@ static double gMRRate = 0;           // playbackRate（1=播放中 0=暂停）
 static double gMRLastRawEla = -1;     // 上次 pipAdoptElapsed 收到的原始 MR/Pegasus elapsed
 static double gMRLastRawAt = 0;       // 上次收到时的墙上时间
 static BOOL gMRAdvancing = NO;        // 由原始 elapsed 的推进速度反推：App 确实在播
+// v0.34：点按快进退（seek）宽限期（墙上时间，绝对值）。发 seek 命令后 App 未必立即上报新位置，
+// 此刻 MR 仍是陈旧（较小）的 elapsed；宽限期内 pipAdoptElapsed 既不追平也不回拉，保留用户目标位，
+// 避免进度条「前进一点又被拉退一点」振荡（用户报「动一点退一点」）。声明须先于 pipAdoptElapsed。
+static double gSeekSettleUntil = 0;
 
 // v0.29：进度条统一时间源 —— 以「播放时钟」（wall-clock × rate 累加）为准，
 // MediaRemote/Pegasus 的 elapsed 只用于：① 首次锚定 ② 真循环（接近片尾且回到片头）
@@ -215,11 +219,16 @@ static void pipAdoptElapsed(double mrEla, double dur, double rate, double tNow) 
     BOOL mrStart = (mrEla < 2.0);
     if (nearEnd && mrStart) {                 // 真循环：片尾 → 片头
         gMRElapsed = mrEla; gMRUpdatedAt = tNow;
+    } else if (gSeekSettleUntil > tNow) {
+        // v0.34：seek 宽限期内保留用户点按后的目标位，既不追平也不回拉。
+        // 发 seek 命令后 App 未必立即上报新位置，此刻 MR 仍是陈旧 elapsed；
+        // 若立刻追平/回拉会让进度条「前进一点又被拉退一点」振荡（用户报「动一点退一点」）。
+        // 宽限期（1.5s）过后 App 通常已上报新位置，再走正常对齐；若真不响应则回拉兜底。
     } else if (mrEla > selfEla + 1.5) {       // 播放时钟落后（曾被错误暂停等）⇒ 追平
         gMRElapsed = mrEla; gMRUpdatedAt = tNow;
     } else if (selfEla > mrEla + 3.0) {       // ★ v0.31：播放时钟明显【领先】真实画面
         // 解除吸附后 App 可能不响应 SetElapsedTime（或响应慢），我们本地跳了但 App 没动
-        // ⇒ 把时钟拉回真实画面，避免进度条越跑越领先视频、点按 seek 反复落在同一点（FreePIP 卡死观感）。
+        // ⇒ 把时钟拉回真实画面，避免进度条越跑越领先视频。宽限期内的同类拉回已在上方抑制。
         gMRElapsed = mrEla; gMRUpdatedAt = tNow;
     }
     // 其余：保留播放时钟，不覆盖（进度条贴合真实画面）
@@ -355,15 +364,20 @@ static UIColor *pipFrameEdge(void) {
 }
 
 // v0.32：点按快进退的命中分区 —— 仅视频左右两侧（外 35%）归我们快进退，
-// 中间 30% 留作死区交给系统原生 PiP 控制（播放/暂停等）。返回 -1=左(快退) / 1=右(快进) / 0=中间死区。
+// 中间 30% 留作死区交给系统原生 PiP 控制（播放/暂停等）。
+// v0.34：顶部 1/3 也死区 —— 系统原生位于画中画上部的两个按钮（播放/暂停等）要能点到。
+// 返回 -1=左(快退) / 1=右(快进) / 0=死区（中间横向 + 顶部纵向，均交给系统）。
 static NSInteger pipSkipZone(CGPoint p, CGRect vr) {
     if (vr.size.width < 8.0) return 0;
     CGFloat w = vr.size.width;
+    CGFloat h = vr.size.height;
     CGFloat leftEdge  = CGRectGetMinX(vr) + w * 0.35;
     CGFloat rightEdge = CGRectGetMaxX(vr) - w * 0.35;
-    if (p.x < leftEdge)  return -1;
-    if (p.x > rightEdge) return 1;
-    return 0;
+    // 横向中间 30% 死区：交给系统原生 PiP 控制
+    if (p.x >= leftEdge && p.x <= rightEdge) return 0;
+    // 顶部 1/3 死区：避开系统原生位于画中画上部的两个按钮
+    if (p.y < CGRectGetMinY(vr) + h * 0.33) return 0;
+    return (p.x < leftEdge) ? -1 : 1;
 }
 
 @interface PIPFrameView : UIView <UIGestureRecognizerDelegate>
@@ -1163,6 +1177,9 @@ static NSString *pipTimeText(double sec) {
     // 避免「点后退进度条不动、只有 App 跳」的脱节（解除吸附态下尤其明显）。
     gMRElapsed = target;
     gMRUpdatedAt = [[NSDate date] timeIntervalSinceReferenceDate];
+    // v0.34：开启 seek 宽限期，抑制「对称回拉」把进度条拉回陈旧 MR 位置（动一点退一点）。
+    // App 通常在 1.5s 内上报新位置，届时经 catch-up/正常外推自然对齐；若真不响应，宽限期后回拉兜底。
+    gSeekSettleUntil = gMRUpdatedAt + 1.5;
 }
 
 // v0.30：点按画中画左半区快退、右半区快进
