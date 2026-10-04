@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.30"
+#define PIP_BUILD_TAG @"v0.31"
 #define PIP_NOTIFY "com.yxh41.pipbar.reload"
 #define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
 
@@ -183,6 +183,12 @@ static double gMRDuration = 0;       // 总时长（秒）；0 = 未知/直播�
 static double gMRElapsed = 0;        // 当前进度（秒）
 static double gMRUpdatedAt = 0;      // 上次更新的墙上时间（用于线性外推，避免每秒跳一下）
 static double gMRRate = 0;           // playbackRate（1=播放中 0=暂停）
+// v0.31：Pegasus 在「解除吸附（FreePIP）」态下可能回报 rate=0 / 占位零 diff，
+// 导致播放时钟被「冻结」。这里用「App 实际上报的 elapsed 是否在推进」来反推是否在播，
+// 不依赖 Pegasus 可能失真的 rate 字段。
+static double gMRLastRawEla = -1;     // 上次 pipAdoptElapsed 收到的原始 MR/Pegasus elapsed
+static double gMRLastRawAt = 0;       // 上次收到时的墙上时间
+static BOOL gMRAdvancing = NO;        // 由原始 elapsed 的推进速度反推：App 确实在播
 
 // v0.29：进度条统一时间源 —— 以「播放时钟」（wall-clock × rate 累加）为准，
 // MediaRemote/Pegasus 的 elapsed 只用于：① 首次锚定 ② 真循环（接近片尾且回到片头）
@@ -191,6 +197,14 @@ static double gMRRate = 0;           // playbackRate（1=播放中 0=暂停）
 static void pipAdoptElapsed(double mrEla, double dur, double rate, double tNow) {
     if (dur > 1.0) gMRDuration = dur;
     if (rate >= 0.0) gMRRate = rate;
+    // v0.31：用「原始 elapsed 的推进速度」反推 App 是否真的在播（不依赖 Pegasus 可能失真的 rate）。
+    // 短视频/解除吸附态下 Pegasus 常回报 rate=0，但 App 其实在放 ⇒ 这里照样判定为 advancing。
+    if (gMRLastRawEla >= 0 && tNow > gMRLastRawAt + 0.1) {
+        double speed = (mrEla - gMRLastRawEla) / (tNow - gMRLastRawAt);
+        if (speed > 0.3) gMRAdvancing = YES;        // 明显在前进
+        else if (speed < 0.05) gMRAdvancing = NO;   // 基本不动（暂停/卡住）⇒ 当作未播，避免空转外推
+    }
+    gMRLastRawEla = mrEla; gMRLastRawAt = tNow;
     if (gMRUpdatedAt <= 0) {            // 首次锚定（含刚进入画中画）
         gMRElapsed = mrEla > 0 ? mrEla : 0;
         gMRUpdatedAt = tNow;
@@ -202,6 +216,10 @@ static void pipAdoptElapsed(double mrEla, double dur, double rate, double tNow) 
     if (nearEnd && mrStart) {                 // 真循环：片尾 → 片头
         gMRElapsed = mrEla; gMRUpdatedAt = tNow;
     } else if (mrEla > selfEla + 1.5) {       // 播放时钟落后（曾被错误暂停等）⇒ 追平
+        gMRElapsed = mrEla; gMRUpdatedAt = tNow;
+    } else if (selfEla > mrEla + 3.0) {       // ★ v0.31：播放时钟明显【领先】真实画面
+        // 解除吸附后 App 可能不响应 SetElapsedTime（或响应慢），我们本地跳了但 App 没动
+        // ⇒ 把时钟拉回真实画面，避免进度条越跑越领先视频、点按 seek 反复落在同一点（FreePIP 卡死观感）。
         gMRElapsed = mrEla; gMRUpdatedAt = tNow;
     }
     // 其余：保留播放时钟，不覆盖（进度条贴合真实画面）
@@ -895,8 +913,12 @@ static NSString *pipTimeText(double sec) {
     if (self.seeking) return CGRectGetWidth(self.trackRect) > 0 ? gDragTargetSec : 0;
     if (gMRDuration <= 0) return 0;
     double e = gMRElapsed;
-    if (gMRRate > 0.05 && gMRUpdatedAt > 0) {
-        e += ([[NSDate date] timeIntervalSinceReferenceDate] - gMRUpdatedAt) * gMRRate;
+    // v0.31：rate 缺失/为 0（FreePIP 解除吸附后 Pegasus 常回报 rate=0）但 App 实际在播时，
+    // 用 1.0 兜底外推，避免播放时钟冻结、进度条停住、点按 seek 反复落在同一点。
+    double effRate = gMRRate;
+    if (effRate < 0.05 && gMRAdvancing) effRate = 1.0;
+    if (effRate > 0.05 && gMRUpdatedAt > 0) {
+        e += ([[NSDate date] timeIntervalSinceReferenceDate] - gMRUpdatedAt) * effRate;
     }
     if (e < 0) e = 0;
     if (e > gMRDuration) e = gMRDuration;

@@ -121,7 +121,14 @@ static void pipPrefsLogImpl(NSString *line) {
     } else {
         _slider.value = (_slider.minimumValue + _slider.maximumValue) / 2.0;
     }
-    _valueLabel.text = [NSString stringWithFormat:@"%.0f", _slider.value];
+    if ([key isEqualToString:@"FrameColor"]) {
+        // 外框颜色：0=白 1=黑 2=青，滑条取整并回显颜色名
+        NSInteger ci = (NSInteger)round(_slider.value);
+        _slider.value = (CGFloat)ci;
+        _valueLabel.text = (ci == 0 ? @"白" : (ci == 2 ? @"青" : @"黑"));
+    } else {
+        _valueLabel.text = [NSString stringWithFormat:@"%.0f", _slider.value];
+    }
 }
 
 - (void)layoutSubviews {
@@ -165,7 +172,8 @@ static void pipPrefsLogImpl(NSString *line) {
 
 - (BOOL)pipIsSliderKey:(NSString *)key {
     return [key isEqualToString:@"FrameWidth"] || [key isEqualToString:@"BarHeight"]
-        || [key isEqualToString:@"SkipSeconds"] || [key isEqualToString:@"FrameOpacity"];
+        || [key isEqualToString:@"SkipSeconds"] || [key isEqualToString:@"FrameOpacity"]
+        || [key isEqualToString:@"FrameColor"];
 }
 
 // 取 indexPath 对应的 specifier（失败返回 nil，调用方回落 super）
@@ -232,8 +240,16 @@ heightForRowAtIndexPath:(NSIndexPath *)indexPath {
 - (void)pipSliderValueChanged:(UISlider *)slider specifier:(PSSpecifier *)specifier {
     NSString *key = [specifier propertyForKey:@"key"];
     if (key == nil) return;
-    [self pipMirrorPref:key value:@(slider.value) throttle:YES];
-    pipPrefsLog(@"slider %@ -> %.0f", key, (double)slider.value);
+    if ([key isEqualToString:@"FrameColor"]) {
+        NSInteger ci = (NSInteger)round(slider.value);   // 外框颜色取整 0/1/2
+        slider.value = (CGFloat)ci;
+        [self pipMirrorPref:key value:@(ci) throttle:YES];
+        pipPrefsLog(@"slider %@ -> %ld（%@）", key, (long)ci,
+                    (ci == 0 ? @"白" : (ci == 2 ? @"青" : @"黑")));
+    } else {
+        [self pipMirrorPref:key value:@(slider.value) throttle:YES];
+        pipPrefsLog(@"slider %@ -> %.0f", key, (double)slider.value);
+    }
 }
 
 #pragma mark - 生命周期

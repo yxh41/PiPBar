@@ -150,29 +150,23 @@
 		</dict>
 		<dict>
 			<key>cell</key>
-			<string>PSSegmentCell</string>
+			<string>PSSliderCell</string>
 			<key>defaults</key>
 			<string>com.yxh41.pipbar</string>
 			<key>key</key>
 			<string>FrameColor</string>
 			<key>label</key>
-			<string>外框颜色</string>
+			<string>外框颜色（0=白 1=黑 2=青）</string>
+			<key>height</key>
+			<real>80</real>
+			<key>min</key>
+			<real>0</real>
+			<key>max</key>
+			<real>2</real>
 			<key>default</key>
-			<string>1</string>
-			<key>values</key>
-			<array>
-				<string>0</string>
-				<string>1</string>
-				<string>2</string>
-			</array>
-			<key>titles</key>
-			<array>
-				<string>白</string>
-				<string>黑</string>
-				<string>青</string>
-			</array>
+			<integer>1</integer>
 			<key>footnote</key>
-			<string>白 / 黑 / 主题青。</string>
+			<string>外框填充色：白 / 黑 / 主题青。拖动取整（0、1、2）。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
