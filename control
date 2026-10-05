@@ -1,9 +1,9 @@
-Package: com.yxh41.pipbar
+Package: com.zlhkf.pipbar
 Name: PiPBar
 Version: 0.0.1
 Architecture: iphoneos-arm64e
 Description: 画中画增强：给系统画中画加一圈外框（顶部/左右同宽，底部加宽为控制条），支持 上一曲 / 播放暂停 / 下一曲（iOS 16，roothide）
-Maintainer: yxh41
-Author: yxh41
+Maintainer: zlhkf
+Author: zlhkf
 Section: Tweaks
 Depends: mobilesubstrate (>= 0.9.5000)

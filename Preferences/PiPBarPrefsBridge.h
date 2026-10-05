@@ -9,8 +9,8 @@
 #import <Foundation/Foundation.h>
 #import <CoreFoundation/CoreFoundation.h>
 
-static NSString *const kPIPGlobalPlist = @"/var/mobile/Library/Preferences/com.yxh41.pipbar.plist";
-static NSString *const kPIPReloadNotify = @"com.yxh41.pipbar.reload";
+static NSString *const kPIPGlobalPlist = @"/var/mobile/Library/Preferences/com.zlhkf.pipbar.plist";
+static NSString *const kPIPReloadNotify = @"com.zlhkf.pipbar.reload";
 
 // 读取全局偏好字典（文件不存在时返回空字典，调用方须判空）
 static inline NSDictionary *pip_globalPrefs(void) {

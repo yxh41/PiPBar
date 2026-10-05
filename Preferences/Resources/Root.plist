@@ -18,7 +18,7 @@
 			<key>cell</key>
 			<string>PSSwitchCell</string>
 			<key>defaults</key>
-			<string>com.yxh41.pipbar</string>
+			<string>com.zlhkf.pipbar</string>
 			<key>key</key>
 			<string>Enabled</string>
 			<key>label</key>
@@ -38,7 +38,7 @@
 			<key>cell</key>
 			<string>PSSwitchCell</string>
 			<key>defaults</key>
-			<string>com.yxh41.pipbar</string>
+			<string>com.zlhkf.pipbar</string>
 			<key>key</key>
 			<string>ShowFrame</string>
 			<key>label</key>
@@ -50,7 +50,7 @@
 			<key>cell</key>
 			<string>PSSwitchCell</string>
 			<key>defaults</key>
-			<string>com.yxh41.pipbar</string>
+			<string>com.zlhkf.pipbar</string>
 			<key>key</key>
 			<string>ShowProgress</string>
 			<key>label</key>
@@ -64,7 +64,7 @@
 			<key>cell</key>
 			<string>PSSwitchCell</string>
 			<key>defaults</key>
-			<string>com.yxh41.pipbar</string>
+			<string>com.zlhkf.pipbar</string>
 			<key>key</key>
 			<string>FreeMove</string>
 			<key>label</key>
@@ -78,7 +78,7 @@
 			<key>cell</key>
 			<string>PSSwitchCell</string>
 			<key>defaults</key>
-			<string>com.yxh41.pipbar</string>
+			<string>com.zlhkf.pipbar</string>
 			<key>key</key>
 			<string>ExtendHit</string>
 			<key>label</key>
@@ -92,7 +92,7 @@
 			<key>cell</key>
 			<string>PSSliderCell</string>
 			<key>defaults</key>
-			<string>com.yxh41.pipbar</string>
+			<string>com.zlhkf.pipbar</string>
 			<key>key</key>
 			<string>FrameWidth</string>
 			<key>label</key>
@@ -112,7 +112,7 @@
 			<key>cell</key>
 			<string>PSSliderCell</string>
 			<key>defaults</key>
-			<string>com.yxh41.pipbar</string>
+			<string>com.zlhkf.pipbar</string>
 			<key>key</key>
 			<string>BarHeight</string>
 			<key>label</key>
@@ -132,7 +132,7 @@
 			<key>cell</key>
 			<string>PSSliderCell</string>
 			<key>defaults</key>
-			<string>com.yxh41.pipbar</string>
+			<string>com.zlhkf.pipbar</string>
 			<key>key</key>
 			<string>SkipSeconds</string>
 			<key>label</key>
@@ -158,7 +158,7 @@
 			<key>cell</key>
 			<string>PSSwitchCell</string>
 			<key>defaults</key>
-			<string>com.yxh41.pipbar</string>
+			<string>com.zlhkf.pipbar</string>
 			<key>key</key>
 			<string>EpisodeSwipe</string>
 			<key>label</key>
@@ -170,9 +170,23 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>defaults</key>
+			<string>com.zlhkf.pipbar</string>
+			<key>key</key>
+			<string>DoubleTapRestore</string>
+			<key>label</key>
+			<string>双击还原全屏</string>
+			<key>default</key>
+			<true/>
+			<key>footnote</key>
+			<string>在画中画上快速点两下 = 系统控制条里的「还原」按钮：画中画收起、App 回前台全屏续播（进度接着走）。走 Pegasus 系统通道，不依赖 App 配合，抖音/B站这类也有效。生效区：视频左右两侧与外框/底部黑边；正中间与顶部三分之一留给了系统原生控制，双击不接管。代价：为避免双击被当成两次快进退，单击快进/快退会晚约 0.35 秒生效。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSSliderCell</string>
 			<key>defaults</key>
-			<string>com.yxh41.pipbar</string>
+			<string>com.zlhkf.pipbar</string>
 			<key>key</key>
 			<string>FrameColor</string>
 			<key>label</key>
@@ -192,7 +206,7 @@
 			<key>cell</key>
 			<string>PSSliderCell</string>
 			<key>defaults</key>
-			<string>com.yxh41.pipbar</string>
+			<string>com.zlhkf.pipbar</string>
 			<key>key</key>
 			<string>FrameOpacity</string>
 			<key>label</key>
@@ -218,7 +232,7 @@
 			<key>cell</key>
 			<string>PSSwitchCell</string>
 			<key>defaults</key>
-			<string>com.yxh41.pipbar</string>
+			<string>com.zlhkf.pipbar</string>
 			<key>key</key>
 			<string>FileLog</string>
 			<key>label</key>
@@ -232,7 +246,7 @@
 			<key>cell</key>
 			<string>PSSwitchCell</string>
 			<key>defaults</key>
-			<string>com.yxh41.pipbar</string>
+			<string>com.zlhkf.pipbar</string>
 			<key>key</key>
 			<string>DebugLog</string>
 			<key>label</key>

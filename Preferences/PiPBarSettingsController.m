@@ -391,7 +391,7 @@ heightForRowAtIndexPath:(NSIndexPath *)indexPath {
     // 权威源是全局 plist（tweak 只读它）⇒ 正确方向是【全局 plist → suite】，仅用于让 cell
     // 显示到正确值；**绝不**反向覆盖全局 plist。
     NSDictionary *global = pip_globalPrefs();
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.yxh41.pipbar"];
+    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:@"com.zlhkf.pipbar"];
     for (PSSpecifier *spec in _specifiers) {
         NSString *key = [spec propertyForKey:@"key"];
         if (!key) continue;

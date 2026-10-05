@@ -32,9 +32,9 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.37h"
-#define PIP_NOTIFY "com.yxh41.pipbar.reload"
-#define PIP_NOTIFY_S @"com.yxh41.pipbar.reload"
+#define PIP_BUILD_TAG @"v0.38"
+#define PIP_NOTIFY "com.zlhkf.pipbar.reload"
+#define PIP_NOTIFY_S @"com.zlhkf.pipbar.reload"
 
 // —— 偏好（CFPreferences 直读全局 plist；SpringBoard 以 mobile 身份运行，无容器隔离坑）——
 static BOOL gEnabled = YES;
@@ -50,11 +50,13 @@ static NSInteger gFrameColor = 1;     // 外框颜色：0 白 / 1 黑 / 2 主题
 static CGFloat gFrameOpacity = 0.55;  // 外框不透明度（plist 存百分数，读时 /100）
 static double gSkipSeconds = 10.0;    // 左右快进退步长（秒）
 static BOOL gEpisodeSwipe = YES;      // 单指上下滑切上/下一集（全局；App 不支持时静默无效）
+static BOOL gDoubleTapRestore = YES;  // v0.38：双击 = 还原全屏（Pegasus commandForRestoreFromPIP）
 
 // roothide per-app 容器隔离：Settings 里 CFPreferences 写的域，SpringBoard 读不到
 // （MapAdKiller/Oback 双双踩实）。范式同款：全局 plist 文件直读，两个进程命中同一物理文件。
 // 写入侧在 PiPBarSettingsController（PiPBarPrefsBridge.h 镜像写）。
-#define PIP_GLOBAL_PLIST "/var/mobile/Library/Preferences/com.yxh41.pipbar.plist"
+#define PIP_GLOBAL_PLIST "/var/mobile/Library/Preferences/com.zlhkf.pipbar.plist"
+#define PIP_GLOBAL_PLIST_OLD "/var/mobile/Library/Preferences/com.yxh41.pipbar.plist"
 
 static id pipPref(NSString *key) {
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:@PIP_GLOBAL_PLIST];
@@ -86,6 +88,7 @@ static void pipReadPrefs(void) {
         if (s >= 1.0 && s <= 60.0) gSkipSeconds = s;
     }
     if ((v = pipPref(@"EpisodeSwipe")) != nil) gEpisodeSwipe = [v boolValue];
+    if ((v = pipPref(@"DoubleTapRestore")) != nil) gDoubleTapRestore = [v boolValue];
     if ((v = pipPref(@"FrameColor")) != nil) {
         NSInteger c = [v integerValue];
         if (c >= 0 && c <= 2) gFrameColor = c;
@@ -141,6 +144,22 @@ static void pipFileWrite(NSString *line) {
     NSLog(@"[PiPBar " PIP_BUILD_TAG "] %@", \
           [NSString stringWithFormat:fmt, ##__VA_ARGS__]); \
 } while (0)
+
+// v0.38：包名 com.yxh41.pipbar → com.zlhkf.pipbar，全局 plist 换路径。
+// 直接切会让用户已经调好的偏好（外框宽度/底部高度/颜色/不透明度/快进步长…）全部回到默认值。
+// 首次启动把旧文件搬过来；新文件一旦存在就再也不碰（用户之后改的是新文件）。
+static void pipMigratePrefsFile(void) {
+    @try {
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSString *dst = @PIP_GLOBAL_PLIST;
+        NSString *src = @PIP_GLOBAL_PLIST_OLD;
+        if ([fm fileExistsAtPath:dst]) return;
+        if (![fm fileExistsAtPath:src]) return;
+        if ([fm copyItemAtPath:src toPath:dst error:nil]) {
+            PIPLogBoot(@"migrated prefs plist: %@ -> %@", src, dst);
+        }
+    } @catch (NSException *e) { /* 迁移失败不影响主流程 */ }
+}
 
 // —— Pegasus / SpringBoard 私有类（@interface 只给编译器看类型；类一律运行时解析）——
 @interface SBPIPContainerViewController : UIViewController
@@ -441,6 +460,9 @@ static NSInteger pipSkipZone(CGPoint p, CGRect vr) {
 @property (nonatomic, strong) UITapGestureRecognizer *closeTap;
 // v0.30：点按画中画左半区快退、右半区快进（步长 gSkipSeconds）
 @property (nonatomic, strong) UITapGestureRecognizer *skipTap;
+// v0.38：双击 = 还原全屏。numberOfTapsRequired=2，skipTap 需等它判定失败才起手
+// （这是方案 A 的代价：单击快进退会晚约 0.35s，换来双击不被误判成两次快进退）。
+@property (nonatomic, strong) UITapGestureRecognizer *fullTap;
 // v0.11：外框矩形（本壳坐标系，含底部黑边）—— 供 pointInside 扩展命中区用
 @property (nonatomic, assign) CGRect hitRect;
 // v0.15：拖动中（此时进度由手指决定，不被心跳覆盖）
@@ -683,6 +705,15 @@ static void pipSwizzlePointInsideOn(Class cls) {
                                                                 action:@selector(pipSkipTap:)];
         self.skipTap.delegate = self;
         [self addGestureRecognizer:self.skipTap];
+        // v0.38 双击还原全屏
+        self.fullTap = [[UITapGestureRecognizer alloc] initWithTarget:self
+                                                               action:@selector(pipFullTap:)];
+        self.fullTap.numberOfTapsRequired = 2;
+        self.fullTap.delegate = self;
+        [self addGestureRecognizer:self.fullTap];
+        // 关键：不设这条的话，双击会先被 skipTap 当成两次单击 ⇒「先跳 ±10s 再还原」。
+        // 设了之后 skipTap 要等 fullTap 判定失败才起手（约 0.35s 延迟）。
+        [self.skipTap requireGestureRecognizerToFail:self.fullTap];
 
         // v0.16：FreePIP 式长按解吸 + 自由拖动 + 双指缩放
         gFreeLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self
@@ -746,15 +777,20 @@ static void pipSwizzlePointInsideOn(Class cls) {
         // v0.32：视频主体 —— 仅左右两侧（外 35%）归本壳接管快进退，
         // 中间 30% 留作死区穿透给系统原生 PiP 控制（播放/暂停等），否则系统自带控制条点不到。
         // 拖动仍由系统 pan（挂在窗口祖先上）接管窗口 ⇒ 既保留拖动换位、又支持点按快进退。
-        if (CGRectGetWidth(self.trackRect) > 1.0) {
-            UIView *host = gVideoHost;
-            if (host != nil) {
-                CGRect vr = [host convertRect:host.bounds toView:self];
-                if (CGRectContainsPoint(vr, point)) {
-                    NSInteger zone = pipSkipZone(point, vr);
-                    if (zone != 0) return self;   // 左/右 → 接管快进退
-                    return nil;                   // 中间死区 → 穿透给系统原生控制
-                }
+        UIView *host = gVideoHost;
+        if (host != nil && CGRectGetWidth(self.trackRect) > 1.0) {
+            CGRect vr = [host convertRect:host.bounds toView:self];
+            if (CGRectContainsPoint(vr, point)) {
+                NSInteger zone = pipSkipZone(point, vr);
+                if (zone != 0) return self;   // 左/右 → 接管快进退
+                return nil;                   // 中间死区 → 穿透给系统原生控制
+            }
+            // v0.38：外框 / 底部黑边（我们自己画出去的部分，系统在这一圈没有任何控件）
+            // 旧逻辑一律 return nil ⇒ 双击在那里收不到触摸。改为放行，专门给 fullTap 用：
+            // 单击在这里没有任何手势绑定（skipTap 已限定必须落在视频主体内），
+            // 系统 pan 挂在祖先视图上、不受 hitTest 影响 ⇒ 拖窗与系统控制条都不受影响。
+            if (!CGRectIsEmpty(self.hitRect) && CGRectContainsPoint(self.hitRect, point)) {
+                return self;
             }
         }
         return nil;
@@ -810,11 +846,28 @@ static void pipSwizzlePointInsideOn(Class cls) {
         if (gFreeMove && !CGRectIsEmpty(self.closeFrame)
             && CGRectContainsPoint(self.closeFrame, p)) return NO;
         // v0.32：中间死区（交给系统原生控制）不让本手势起手，避免吞掉系统自带控制条的点击
+        // v0.38：外框/黑边现在也命中本壳（给双击用）⇒ 必须限定落在视频主体内，
+        // 否则「点外框一下」会被当成快进/快退。
         UIView *host = gVideoHost;
         if (host != nil) {
             CGRect vr = [host convertRect:host.bounds toView:self];
+            if (!CGRectContainsPoint(vr, p)) return NO;
             if (vr.size.width >= 8.0 && pipSkipZone(p, vr) == 0) return NO;
+        } else {
+            return NO;
         }
+        return YES;
+    }
+    if (gr == self.fullTap) {
+        // v0.38 双击：进度条归 seek、关闭按钮归 closeTap；其余（视频主体 + 外框/黑边）都认。
+        // 中间 30% / 顶部 1/3 死区在 hitTest 里已经 return nil，手势根本收不到 ⇒ 这里放行无害。
+        CGPoint p = [gr locationInView:self];
+        if (CGRectGetWidth(self.trackRect) > 1.0) {
+            CGRect hot = CGRectInset(self.trackRect, -8.0, -20.0);
+            if (CGRectContainsPoint(hot, p)) return NO;
+        }
+        if (gFreeMove && !CGRectIsEmpty(self.closeFrame)
+            && CGRectContainsPoint(self.closeFrame, p)) return NO;
         return YES;
     }
     if (gr == gFreePan) {
@@ -897,6 +950,17 @@ static BOOL pipSendPegasusCommand(NSString *name) {
     void (*hc)(id, SEL, id) = (void (*)(id, SEL, id))objc_msgSend;
     hc(vc, @selector(handleCommand:), cmd);
     return YES;
+}
+
+// v0.38：还原全屏 = 系统 PiP 控制条上那个「⤢ 还原」按钮，走 Pegasus 系统通道。
+// 与自由态 ✕ 的 commandForCancelPIP 完全同一条 pipSendPegasusCommand 通路；
+// 不依赖 App 注册任何命令 ⇒ 连 list=0 的抖音/B站也能还原（切集做不到这点）。
+static void pipRestoreFromPIP(void) {
+    if (pipSendPegasusCommand(@"commandForRestoreFromPIP")) {
+        PIPLog(@"restore fullscreen via Pegasus commandForRestoreFromPIP");
+        return;
+    }
+    PIPLog(@"restore fullscreen FAILED: PGCommand/contentVC unavailable（静默无效）");
 }
 
 // v0.23：关闭 PiP —— 多候选 selector 降级，覆盖 iOS 版本差异。
@@ -1238,6 +1302,14 @@ static NSString *pipTimeText(double sec) {
     if (zone == 0) return;
     [self pipSeekByInterval:zone < 0 ? -gSkipSeconds : gSkipSeconds];
     PIPLog(@"skip tap %@ %.0fs", zone < 0 ? @"←后退" : @"前进→", gSkipSeconds);
+}
+
+// v0.38：双击还原全屏。等于替用户点了系统控制条上的「⤢ 还原」。
+- (void)pipFullTap:(UITapGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateEnded) return;
+    if (!gDoubleTapRestore) return;
+    PIPLog(@"double tap -> restore fullscreen (enabled=%d)", gEnabled);
+    pipRestoreFromPIP();
 }
 
 // 全部按【当前视频矩形 + 当前偏好】重算 —— 偏好热更新也走这里（setNeedsLayout）
@@ -1863,6 +1935,7 @@ static void pipInitPegasusOnce(void) {
 }
 
 %ctor {
+    pipMigratePrefsFile();   // v0.38：包名换 zlhkf，旧偏好文件搬过来，避免设置被清空
     pipReadPrefs();
     %init;
     pipInitPegasusOnce();   // 若已加载则此刻挂上；否则等 PiP 起来由 loadView 补挂
