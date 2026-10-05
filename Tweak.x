@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.38"
+#define PIP_BUILD_TAG @"v0.38b"
 #define PIP_NOTIFY "com.zlhkf.pipbar.reload"
 #define PIP_NOTIFY_S @"com.zlhkf.pipbar.reload"
 
@@ -859,8 +859,7 @@ static void pipSwizzlePointInsideOn(Class cls) {
         return YES;
     }
     if (gr == self.fullTap) {
-        // v0.38 双击：进度条归 seek、关闭按钮归 closeTap；其余（视频主体 + 外框/黑边）都认。
-        // 中间 30% / 顶部 1/3 死区在 hitTest 里已经 return nil，手势根本收不到 ⇒ 这里放行无害。
+        // v0.38 双击：进度条归 seek、关闭按钮归 closeTap；其余（外框/黑边）都认。
         CGPoint p = [gr locationInView:self];
         if (CGRectGetWidth(self.trackRect) > 1.0) {
             CGRect hot = CGRectInset(self.trackRect, -8.0, -20.0);
@@ -868,6 +867,16 @@ static void pipSwizzlePointInsideOn(Class cls) {
         }
         if (gFreeMove && !CGRectIsEmpty(self.closeFrame)
             && CGRectContainsPoint(self.closeFrame, p)) return NO;
+        // v0.38b：双击还原只落在「视频矩形之外」（外框 + 底部黑边），不在视频主体内。
+        // 这样视频左右侧单击快进/快退即时生效、不再等双击判定（~0.35s 延迟彻底消除）；
+        // 双击还原的落点退回「外框边框 + 底部黑边」—— 那里本就没有任何单击操作，不冲突。
+        // requireGestureRecognizerToFail 仍保留：视频区内 fullTap 这里直接 return NO
+        // ⇒ 立即失败 ⇒ skipTap 立即起手，零延迟。
+        UIView *host = gVideoHost;
+        if (host != nil) {
+            CGRect vr = [host convertRect:host.bounds toView:self];
+            if (CGRectContainsPoint(vr, p)) return NO;
+        }
         return YES;
     }
     if (gr == gFreePan) {

@@ -10,7 +10,20 @@
 #import <CoreFoundation/CoreFoundation.h>
 
 static NSString *const kPIPGlobalPlist = @"/var/mobile/Library/Preferences/com.zlhkf.pipbar.plist";
+static NSString *const kPIPGlobalPlistOld = @"/var/mobile/Library/Preferences/com.yxh41.pipbar.plist";
 static NSString *const kPIPReloadNotify = @"com.zlhkf.pipbar.reload";
+
+// v0.38b：包名 yxh41 → zlhkf 时全局 plist 换了路径。若只在新文件不存在、旧文件存在时
+// 把它搬过来（幂等），两进程（SpringBoard / 设置）谁先启动谁搬，避免「装完、respring 前先
+// 开设置」这种反常顺序用空新文件盖掉旧偏好。函数体 static inline，tweak 与 bundle 各编一份。
+static inline void pipMigratePrefsOnce(void) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *dst = kPIPGlobalPlist;
+    NSString *src = kPIPGlobalPlistOld;
+    if ([fm fileExistsAtPath:dst]) return;
+    if (![fm fileExistsAtPath:src]) return;
+    [fm copyItemAtPath:src toPath:dst error:nil];
+}
 
 // 读取全局偏好字典（文件不存在时返回空字典，调用方须判空）
 static inline NSDictionary *pip_globalPrefs(void) {

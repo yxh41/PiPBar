@@ -383,6 +383,9 @@ heightForRowAtIndexPath:(NSIndexPath *)indexPath {
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    // v0.38b：设置进程也跑一次偏好迁移（SpringBoard %ctor 已跑）。两进程谁先启动谁搬，
+    // 杜绝「装完、respring 前先开设置」用空新文件盖掉旧偏好的竞态。幂等：新文件存在即不动。
+    pipMigratePrefsOnce();
     if (!_specifiers) [self specifiers];
 
     // v0.25 方向修正（真机实锤 barh=60）：旧代码把 NSUserDefaults suite 的值**覆盖写回**
