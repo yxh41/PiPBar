@@ -12,6 +12,8 @@
 		<string>PiPBarSettingsController</string>
 		<key>footerText</key>
 		<string>画中画增强：外框 + 底部控制条（roothide / iOS 16）</string>
+		<key>icon</key>
+		<string>icon.png</string>
 		<key>isController</key>
 		<true/>
 		<key>label</key>
