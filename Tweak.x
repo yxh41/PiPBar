@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.40"
+#define PIP_BUILD_TAG @"v0.41"
 #define PIP_NOTIFY "com.zlhkf.pipbar.reload"
 #define PIP_NOTIFY_S @"com.zlhkf.pipbar.reload"
 
@@ -1091,11 +1091,19 @@ static NSString *pipTimeText(double sec) {
     // ⚠️ v0.15 真机修复：首帧 layoutSubviews 时 gMRDuration 还是 0 ⇒ trackRect 被置零；
     // 之后 MediaRemote 探到时长（dur=23.3）也不再触发布局 ⇒ 进度条永远不显示。
     // 这里做懒初始化：数据到位后主动补一次布局。
-    BOOL show = haveDur && !gExpandedUI && gEnabled && gShowBarProgress;
-    // 有 NowPlaying（pid>0）但无时长（直播 / webview 播放器不报 MR 时长，如红果）
-    // ⇒ 显示「不确定进度条」跑马灯，仅作播放指示，不可拖动 seek。
     BOOL nowPlaying = (gMRAppPID > 0);
-    BOOL indet = gShowBarProgress && gEnabled && !gExpandedUI && nowPlaying && !haveDur;
+    // v0.41：跑马灯触发从「无时长」改为「在播但位置没在前进」。
+    // 红果两态都归这里：① webview 不报 MR 时长(haveDur=0) ② 报了时长(Pegasus 取的总长)
+    //   但 MR/Pegasus 都不报实时位置(gMRAdvancing=NO) ⇒ 进度条有总长、能拖、但永远不走。
+    // isPlaying = Pegasus 播放状态(gPlaying) 或 MR 速率>0，作「真在播」闸门：
+    //   暂停/未播(rate=0 且 gPlaying=NO) 不出跑马灯，正常 App 暂停应停在暂停位；
+    //   红果 rate=0 但 Pegasus 仍在播(gPlaying=YES) ⇒ 出跑马灯（在放，只是没有位置源）。
+    BOOL isPlaying = gPlaying || (gMRRate > 0.05);
+    BOOL advancing = gMRAdvancing;   // 位置在持续推进（正常 App 在播）
+    // 普通条：有总时长、且（在前进 或 没在播）→ 前进时走实时条、暂停时停在暂停位。
+    BOOL show = haveDur && !gExpandedUI && gEnabled && gShowBarProgress && (advancing || !isPlaying);
+    // 跑马灯：有 NowPlaying、在播、但位置冻结（无实时位置源）→ 仅作「正在播放」指示，不可 seek。
+    BOOL indet = gShowBarProgress && gEnabled && !gExpandedUI && nowPlaying && !advancing && isPlaying;
     // 懒初始化：需要 trackRect 却没有时主动补一次布局（正常 / 不确定进度条都走这条）
     if ((show || indet) && CGRectGetWidth(self.trackRect) < 1.0) {
         [self setNeedsLayout];
@@ -1148,8 +1156,8 @@ static NSString *pipTimeText(double sec) {
     }
 }
 
-// 不确定进度条（跑马灯）—— 有 NowPlaying 但无时长（直播 / webview 播放器不报 MR 时长，如红果）。
-// 复用 fillLayer 作一段高亮短条，靠 transform.translation.x 动画左右滑动；不可拖动 seek。
+// 不确定进度条（跑马灯）—— 有 NowPlaying 且在播、但位置没在前进（红果：MR 三字段全 0，
+// 仅 Pegasus 能给总时长、给不了实时位置/速率）。复用 fillLayer 作高亮短条左右滑动；不可拖动 seek。
 - (void)pipEnsureIndet {
     CGRect tr = self.trackRect;
     if (CGRectGetWidth(tr) < 1.0) return;
