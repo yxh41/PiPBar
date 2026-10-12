@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.38b"
+#define PIP_BUILD_TAG @"v0.40"
 #define PIP_NOTIFY "com.zlhkf.pipbar.reload"
 #define PIP_NOTIFY_S @"com.zlhkf.pipbar.reload"
 
@@ -468,8 +468,11 @@ static NSInteger pipSkipZone(CGPoint p, CGRect vr) {
 // v0.15：拖动中（此时进度由手指决定，不被心跳覆盖）
 @property (nonatomic, assign) BOOL seeking;
 @property (nonatomic, assign) CGRect trackRect;
+@property (nonatomic, assign) BOOL indetActive;   // 不确定进度条（跑马灯）动画是否在跑
 - (void)pipSelfHeal;
 - (void)pipRefreshProgress;
+- (void)pipEnsureIndet;
+- (void)pipStopIndet;
 // v0.26：必须在 @interface 里声明 —— pipApplyFreeMovePref 是文件级静态函数，
 // 位于 @implementation 之前，只认 @interface 里声明过的 selector
 - (void)pipLayoutCloseButton;
@@ -1088,13 +1091,26 @@ static NSString *pipTimeText(double sec) {
     // ⚠️ v0.15 真机修复：首帧 layoutSubviews 时 gMRDuration 还是 0 ⇒ trackRect 被置零；
     // 之后 MediaRemote 探到时长（dur=23.3）也不再触发布局 ⇒ 进度条永远不显示。
     // 这里做懒初始化：数据到位后主动补一次布局。
-    if (haveDur && CGRectGetWidth(self.trackRect) < 1.0) {
+    BOOL show = haveDur && !gExpandedUI && gEnabled && gShowBarProgress;
+    // 有 NowPlaying（pid>0）但无时长（直播 / webview 播放器不报 MR 时长，如红果）
+    // ⇒ 显示「不确定进度条」跑马灯，仅作播放指示，不可拖动 seek。
+    BOOL nowPlaying = (gMRAppPID > 0);
+    BOOL indet = gShowBarProgress && gEnabled && !gExpandedUI && nowPlaying && !haveDur;
+    // 懒初始化：需要 trackRect 却没有时主动补一次布局（正常 / 不确定进度条都走这条）
+    if ((show || indet) && CGRectGetWidth(self.trackRect) < 1.0) {
         [self setNeedsLayout];
     }
-    BOOL show = haveDur && !gExpandedUI && gEnabled && gShowBarProgress;
-    self.trackLayer.hidden = !show;
-    self.fillLayer.hidden = !show;
-    if (!show) {
+    self.trackLayer.hidden = !(show || indet);
+    self.fillLayer.hidden = !(show || indet);
+    if (show) {
+        [self pipStopIndet];
+    } else if (indet) {
+        [self pipEnsureIndet];
+        self.thumbLayer.hidden = YES;
+        self.timeLabel.hidden = YES;
+        return;
+    } else {
+        [self pipStopIndet];
         self.thumbLayer.hidden = YES;
         self.timeLabel.hidden = YES;
         return;
@@ -1129,6 +1145,36 @@ static NSString *pipTimeText(double sec) {
         CGFloat tx = CGRectGetMinX(tr) + fw - tw / 2.0;
         tx = MAX(CGRectGetMinX(tr) - 14.0, MIN(tx, CGRectGetMaxX(tr) + 14.0 - tw));
         self.timeLabel.frame = CGRectMake(tx, CGRectGetMinY(tr) - th - 4.0, tw, th);
+    }
+}
+
+// 不确定进度条（跑马灯）—— 有 NowPlaying 但无时长（直播 / webview 播放器不报 MR 时长，如红果）。
+// 复用 fillLayer 作一段高亮短条，靠 transform.translation.x 动画左右滑动；不可拖动 seek。
+- (void)pipEnsureIndet {
+    CGRect tr = self.trackRect;
+    if (CGRectGetWidth(tr) < 1.0) return;
+    CGFloat h = CGRectGetHeight(tr);
+    CGFloat segW = MAX(tr.size.width * 0.32, 22.0);
+    self.fillLayer.path =
+        [UIBezierPath bezierPathWithRoundedRect:CGRectMake(tr.origin.x, tr.origin.y, segW, h)
+                                    cornerRadius:h / 2.0].CGPath;
+    if (!self.indetActive) {
+        self.indetActive = YES;
+        CABasicAnimation *a = [CABasicAnimation animationWithKeyPath:@"transform.translation.x"];
+        a.fromValue = @(0.0);
+        a.toValue = @(tr.size.width - segW);
+        a.duration = 1.3;
+        a.repeatCount = 1000000.0f;
+        a.autoreverses = YES;
+        a.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [self.fillLayer addAnimation:a forKey:@"pipIndet"];
+    }
+}
+
+- (void)pipStopIndet {
+    if (self.indetActive) {
+        [self.fillLayer removeAnimationForKey:@"pipIndet"];
+        self.indetActive = NO;
     }
 }
 
@@ -1388,7 +1434,9 @@ static NSString *pipTimeText(double sec) {
     CGFloat inset = 8.0;
     CGFloat chin = MAX(bh, 22.0);
     BOOL showProg = gShowBarProgress && gMRDuration > 1.0 && gEnabled && !gExpandedUI;
-    if (showProg) {
+    // 有 NowPlaying 但无时长（如红果）也需 trackRect + 轨道，供不确定进度条使用
+    BOOL showIndet = gShowBarProgress && gEnabled && !gExpandedUI && (gMRAppPID > 0) && !showProg;
+    if (showProg || showIndet) {
         // 进度条居中于黑边，横向近乎铺满；上下留出可点按的热区
         // v0.20：轨道由 3pt 加粗到 5pt（用户反馈「很难拉动」）—— 3pt 细线在
         // PiP 这种小尺寸下几乎点不准，加粗后肉眼可见、手指也容易命中。
