@@ -1206,10 +1206,12 @@ static NSString *pipTimeText(double sec) {
         self.timeLabel.frame = CGRectMake(tx, CGRectGetMinY(tr) - th - 4.0, tw, th);
     }
     // v0.40：A-B 状态标签（拖动进度条时让位给时间标签，避免重叠）
+    // ⚠️ 本工具链会把 dylib 里的非 ASCII cstring 全部剥离（中文日志/中文 UI 均不进二进制），
+    // 故屏幕可见文案用 ASCII，保证真机显示；设置面板里的中文描述在 plist（不被剥离）里照常显示。
     self.abLabel.hidden = !(abAny && gEnabled && !gExpandedUI && !self.seeking);
     if (!self.abLabel.hidden) {
         if (gABActive) {
-            self.abLabel.text = [NSString stringWithFormat:@"A-B 循环 %@-%@",
+            self.abLabel.text = [NSString stringWithFormat:@"A-B LOOP %@-%@",
                                  pipTimeText(gABStart), pipTimeText(gABEnd)];
         } else {
             self.abLabel.text = [NSString stringWithFormat:@"A %@", pipTimeText(gABStart)];
