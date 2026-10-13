@@ -32,7 +32,7 @@
 #import <CoreFoundation/CoreFoundation.h>
 #import <dlfcn.h>
 
-#define PIP_BUILD_TAG @"v0.39-rollback"
+#define PIP_BUILD_TAG @"v0.40-abrepeat"
 #define PIP_NOTIFY "com.zlhkf.pipbar.reload"
 #define PIP_NOTIFY_S @"com.zlhkf.pipbar.reload"
 
@@ -51,6 +51,13 @@ static CGFloat gFrameOpacity = 0.55;  // 外框不透明度（plist 存百分数
 static double gSkipSeconds = 10.0;    // 左右快进退步长（秒）
 static BOOL gEpisodeSwipe = YES;      // 单指上下滑切上/下一集（全局；App 不支持时静默无效）
 static BOOL gDoubleTapRestore = YES;  // v0.38：双击 = 还原全屏（Pegasus commandForRestoreFromPIP）
+
+// v0.40：A-B 复读（长按进度条设 A/B 点，心跳越界跳回 A）
+static BOOL gABRepeat = NO;          // 设置总开关
+static double gABStart = -1;         // A 点（循环起点，绝对秒）；-1 = 未设
+static double gABEnd = -1;           // B 点（循环终点）
+static BOOL gABActive = NO;          // A、B 皆设且 B>A ⇒ 进入循环
+static double gABDuration = 0;       // 设 A 时的总时长，用于检测换片/换集失效
 
 // roothide per-app 容器隔离：Settings 里 CFPreferences 写的域，SpringBoard 读不到
 // （MapAdKiller/Oback 双双踩实）。范式同款：全局 plist 文件直读，两个进程命中同一物理文件。
@@ -89,6 +96,9 @@ static void pipReadPrefs(void) {
     }
     if ((v = pipPref(@"EpisodeSwipe")) != nil) gEpisodeSwipe = [v boolValue];
     if ((v = pipPref(@"DoubleTapRestore")) != nil) gDoubleTapRestore = [v boolValue];
+    if ((v = pipPref(@"ABRepeat")) != nil) gABRepeat = [v boolValue];
+    // v0.40：A-B 开关关闭时立即清除已设点，避免残留循环
+    if (!gABRepeat) { gABStart = -1; gABEnd = -1; gABActive = NO; gABDuration = 0; }
     if ((v = pipPref(@"FrameColor")) != nil) {
         NSInteger c = [v integerValue];
         if (c >= 0 && c <= 2) gFrameColor = c;
@@ -446,6 +456,8 @@ static NSInteger pipSkipZone(CGPoint p, CGRect vr) {
 @property (nonatomic, strong) CAShapeLayer *fillLayer;
 @property (nonatomic, strong) CALayer *thumbLayer;
 @property (nonatomic, strong) UILabel *timeLabel;
+@property (nonatomic, strong) UILabel *abLabel;          // v0.40：A-B 状态标签（A 起点 / A-B 循环）
+@property (nonatomic, strong) CAShapeLayer *abBandLayer; // v0.40：进度条 A-B 区间高亮带
 @property (nonatomic, strong) UIPanGestureRecognizer *seekPan;
 @property (nonatomic, strong) UITapGestureRecognizer *seekTap;
 // v0.26：自由态（解除吸附）专用关闭按钮 —— 自由态下整块视频被壳接管，
@@ -508,6 +520,7 @@ static BOOL gFreeMove = NO;          // NO=系统吸附（默认） YES=自由�
 static UIPanGestureRecognizer *gFreePan = nil;
 static UIPinchGestureRecognizer *gFreePinch = nil;
 static UILongPressGestureRecognizer *gFreeLongPress = nil;
+static UILongPressGestureRecognizer *gABLongPress = nil;   // v0.40：A-B 复读长按（进度条热区）
 
 // v0.17：系统 pan 手势是否要被我们吞掉。
 // 根因（v0.16 真机反馈「拖进度条时画中画跟着动」）：v0.11 扩展了 hitRect 让窗口在
@@ -674,6 +687,12 @@ static void pipSwizzlePointInsideOn(Class cls) {
         self.fillLayer.fillColor = [UIColor colorWithWhite:1.0 alpha:0.92].CGColor;
         self.fillLayer.masksToBounds = NO;
         [self.layer addSublayer:self.fillLayer];
+        // v0.40：A-B 区间高亮带（青色半透明），叠加在已播放段之上
+        self.abBandLayer = [CAShapeLayer layer];
+        self.abBandLayer.fillColor = [UIColor colorWithRed:0.0 green:0.78 blue:0.86 alpha:0.5].CGColor;
+        self.abBandLayer.masksToBounds = NO;
+        self.abBandLayer.hidden = YES;
+        [self.layer addSublayer:self.abBandLayer];
         self.thumbLayer = [CALayer layer];
         self.thumbLayer.backgroundColor = UIColor.whiteColor.CGColor;
         self.thumbLayer.cornerRadius = 5.5;
@@ -688,6 +707,13 @@ static void pipSwizzlePointInsideOn(Class cls) {
         self.timeLabel.textAlignment = NSTextAlignmentCenter;
         self.timeLabel.hidden = YES;
         [self addSubview:self.timeLabel];
+        // v0.40：A-B 复读状态标签（平时隐藏，设 A 后显示在进度条上方）
+        self.abLabel = [[UILabel alloc] initWithFrame:CGRectZero];
+        self.abLabel.font = [UIFont monospacedDigitSystemFontOfSize:11.0 weight:UIFontWeightMedium];
+        self.abLabel.textColor = [UIColor colorWithRed:0.0 green:0.78 blue:0.86 alpha:1.0];
+        self.abLabel.textAlignment = NSTextAlignmentCenter;
+        self.abLabel.hidden = YES;
+        [self addSubview:self.abLabel];
         // 拖动 / 点按手势（挂在壳上，靠 trackRect 判定是否落在进度条上）
         self.seekPan = [[UIPanGestureRecognizer alloc] initWithTarget:self
                                                                 action:@selector(pipSeekGesture:)];
@@ -729,6 +755,12 @@ static void pipSwizzlePointInsideOn(Class cls) {
         gFreePinch.enabled = NO;
         gFreePinch.delegate = self;
         [self addGestureRecognizer:gFreePinch];
+        // v0.40：A-B 复读 —— 进度条长按设 A/B（再次长按清除）；心跳越界跳回 A
+        gABLongPress = [[UILongPressGestureRecognizer alloc] initWithTarget:self
+                                                                     action:@selector(pipABLongPress:)];
+        gABLongPress.minimumPressDuration = 0.5;
+        gABLongPress.delegate = self;
+        [self addGestureRecognizer:gABLongPress];
 
         // v0.26：关闭按钮改纯图层渲染（圆底衬 + ✕ 描边），加入顺序在最后 ⇒ 位于所有图层之上
         self.closeBgLayer = [CAShapeLayer layer];
@@ -891,6 +923,15 @@ static void pipSwizzlePointInsideOn(Class cls) {
         return YES;
     }
     if (gr == gFreePinch) return YES;
+    if (gr == gABLongPress) {
+        // v0.40：仅在进度条热区、且 A-B 开关开启时生效；否则让出（不拦截）
+        if (!gABRepeat) return NO;
+        if (CGRectGetWidth(self.trackRect) > 1.0) {
+            CGRect hot = CGRectInset(self.trackRect, -8.0, -20.0);
+            return CGRectContainsPoint(hot, [gr locationInView:self]);
+        }
+        return NO;
+    }
     return YES;
 }
 
@@ -1091,6 +1132,12 @@ static NSString *pipTimeText(double sec) {
     if (haveDur && CGRectGetWidth(self.trackRect) < 1.0) {
         [self setNeedsLayout];
     }
+    // v0.40：A-B 复读 —— 总时长漂移（切歌/换集）超过 1s 自动失效，避免循环到错误位置
+    if ((gABStart >= 0 || gABActive) && gMRDuration > 1.0
+        && fabs(gMRDuration - gABDuration) > 1.0) {
+        gABStart = -1; gABEnd = -1; gABActive = NO; gABDuration = 0;
+        PIPLog(@"AB 复读：总时长漂移，自动清除");
+    }
     BOOL show = haveDur && !gExpandedUI && gEnabled && gShowBarProgress;
     self.trackLayer.hidden = !show;
     self.fillLayer.hidden = !show;
@@ -1102,6 +1149,22 @@ static NSString *pipTimeText(double sec) {
     CGFloat w = CGRectGetWidth(self.trackRect);
     if (w < 1.0) return;
 
+    // v0.40：A-B 复读状态（gABStart>=0 表示已设 A）
+    BOOL abAny = (gABStart >= 0);
+    // v0.40：A-B 循环 —— 位置越过 B 立即跳回 A（复用 seek 校准，抑制回拉振荡）
+    if (gABActive && gABEnd > gABStart && gMRDuration > 1.0) {
+        double cnow = [self pipCurrentSeconds];
+        if (cnow >= gABEnd - 0.05) {
+            double target = gABStart;
+            if (gMRSetElapsedTime != NULL) gMRSetElapsedTime(target);
+            gMRElapsed = target;
+            gMRUpdatedAt = [[NSDate date] timeIntervalSinceReferenceDate];
+            gSeekSettleUntil = gMRUpdatedAt + 1.0;
+            gSeekHoldEla = target;
+            PIPLog(@"AB 复读：跳回 A = %.2fs", target);
+        }
+    }
+
     double cur = [self pipCurrentSeconds];
     CGFloat ratio = (CGFloat)(cur / gMRDuration);
     if (ratio < 0) ratio = 0;
@@ -1112,6 +1175,18 @@ static NSString *pipTimeText(double sec) {
     self.fillLayer.path =
         [UIBezierPath bezierPathWithRoundedRect:CGRectMake(tr.origin.x, tr.origin.y, fw, CGRectGetHeight(tr))
                                     cornerRadius:CGRectGetHeight(tr) / 2.0].CGPath;
+    // v0.40：A-B 区间高亮带（青色半透明，叠加在已播段之上）
+    self.abBandLayer.hidden = !(abAny && gEnabled && !gExpandedUI);
+    if (!self.abBandLayer.hidden) {
+        CGFloat ax = tr.origin.x + w * (gABStart / gMRDuration);
+        CGFloat bx = (gABActive && gABEnd > gABStart)
+            ? tr.origin.x + w * (gABEnd / gMRDuration)
+            : CGRectGetMaxX(tr);
+        CGFloat bw = bx - ax; if (bw < 0) bw = 0;
+        self.abBandLayer.path =
+            [UIBezierPath bezierPathWithRoundedRect:CGRectMake(ax, tr.origin.y, bw, CGRectGetHeight(tr))
+                                       cornerRadius:CGRectGetHeight(tr) / 2.0].CGPath;
+    }
     // 拇指：拖动/点按时才显示
     self.thumbLayer.hidden = !self.seeking;
     if (self.seeking) {
@@ -1129,6 +1204,21 @@ static NSString *pipTimeText(double sec) {
         CGFloat tx = CGRectGetMinX(tr) + fw - tw / 2.0;
         tx = MAX(CGRectGetMinX(tr) - 14.0, MIN(tx, CGRectGetMaxX(tr) + 14.0 - tw));
         self.timeLabel.frame = CGRectMake(tx, CGRectGetMinY(tr) - th - 4.0, tw, th);
+    }
+    // v0.40：A-B 状态标签（拖动进度条时让位给时间标签，避免重叠）
+    self.abLabel.hidden = !(abAny && gEnabled && !gExpandedUI && !self.seeking);
+    if (!self.abLabel.hidden) {
+        if (gABActive) {
+            self.abLabel.text = [NSString stringWithFormat:@"A-B 循环 %@-%@",
+                                 pipTimeText(gABStart), pipTimeText(gABEnd)];
+        } else {
+            self.abLabel.text = [NSString stringWithFormat:@"A %@", pipTimeText(gABStart)];
+        }
+        CGSize sz = [self.abLabel sizeThatFits:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)];
+        CGFloat lw = MAX(sz.width + 12.0, 60.0), lh = 18.0;
+        CGFloat lx = CGRectGetMidX(tr) - lw / 2.0;
+        lx = MAX(CGRectGetMinX(tr) - 14.0, MIN(lx, CGRectGetMaxX(tr) + 14.0 - lw));
+        self.abLabel.frame = CGRectMake(lx, CGRectGetMinY(tr) - lh - 4.0, lw, lh);
     }
 }
 
@@ -1319,6 +1409,36 @@ static NSString *pipTimeText(double sec) {
     if (!gDoubleTapRestore) return;
     PIPLog(@"double tap -> restore fullscreen (enabled=%d)", gEnabled);
     pipRestoreFromPIP();
+}
+
+// v0.40：A-B 复读 —— 进度条长按设 A / B / 清除
+- (void)pipABLongPress:(UILongPressGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateBegan) return;
+    if (!gABRepeat) return;                 // 开关关闭则忽略（仲裁已拦，双保险）
+    if (gMRDuration <= 1.0) return;         // 无总时长（直播/红果式冻结）不设点
+    CGRect hot = CGRectInset(self.trackRect, -8.0, -20.0);
+    CGPoint p = [gr locationInView:self];
+    if (!CGRectContainsPoint(hot, p)) return;
+    double cur = [self pipCurrentSeconds];
+    if (gABStart < 0) {
+        // 第一次长按：设 A（循环起点）
+        gABStart = cur; gABEnd = -1; gABActive = NO; gABDuration = gMRDuration;
+        PIPLog(@"AB 复读：设 A = %.2fs / %.2fs", cur, gMRDuration);
+    } else if (!gABActive) {
+        // 第二次长按：设 B（必须晚于 A），否则把 A 重新设到当前位置
+        if (cur > gABStart + 0.5) {
+            gABEnd = cur; gABActive = YES;
+            PIPLog(@"AB 复读：设 B = %.2fs，启用循环 A=%.2f -> B=%.2f", cur, gABStart, gABEnd);
+        } else {
+            gABStart = cur; gABEnd = -1; gABActive = NO; gABDuration = gMRDuration;
+            PIPLog(@"AB 复读：B 未晚于 A，重设 A = %.2fs", cur);
+        }
+    } else {
+        // 第三次长按：清除
+        gABStart = -1; gABEnd = -1; gABActive = NO; gABDuration = 0;
+        PIPLog(@"AB 复读：已清除");
+    }
+    [self pipRefreshProgress];
 }
 
 // 全部按【当前视频矩形 + 当前偏好】重算 —— 偏好热更新也走这里（setNeedsLayout）

@@ -184,6 +184,26 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>A-B 复读（长按进度条设点）</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>defaults</key>
+			<string>com.zlhkf.pipbar</string>
+			<key>key</key>
+			<string>ABRepeat</string>
+			<key>label</key>
+			<string>启用 A-B 复读</string>
+			<key>default</key>
+			<false/>
+			<key>footnote</key>
+			<string>开启后，在画中画底部进度条上长按 = 设 A 点（循环起点），再长按 = 设 B 点（循环终点，必须晚于 A），第三次长按清除。播放越过 B 自动跳回 A 循环。设 A 后若总时长漂移（切歌/换集）会自动失效。无总时长（直播/红果式冻结）不设点。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSSliderCell</string>
 			<key>defaults</key>
 			<string>com.zlhkf.pipbar</string>
